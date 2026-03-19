@@ -1,4 +1,5 @@
 import numpy as np
+import cma
 
 from evorob.algorithms.base_ea import EA
 
@@ -28,6 +29,16 @@ class EvoAlgAPI(EA):
             **kwargs: Additional arguments for the EA framework
         """
         # TODO: Initialize your chosen EA framework here
+        sigma = kwargs.get('sigma', 1.0)
+        self.es = cma.CMAEvolutionStrategy(
+            np.zeros(n_params), sigma, {
+                'popsize': population_size,
+                #'CMA_diagonal': True
+            }
+        )
+            #the two paramters are as follows -> dimensionality of the search
+            # -> initial step size (how many standard deviations the initial step size is)
+
         self.n_params = n_params
         self.n_gen = num_generations
         self.population_size = population_size
@@ -42,12 +53,6 @@ class EvoAlgAPI(EA):
         self.x = None
         self.f = None
 
-        raise NotImplementedError(
-            "TODO: Initialize your chosen EA framework.\n"
-            "Recommended: pip install cma, then import cma and create CMAEvolutionStrategy.\n"
-            "See https://github.com/CMA-ES/pycma for documentation."
-        )
-
     def ask(self) -> np.ndarray:
         """Sample population from the algorithm.
 
@@ -57,11 +62,10 @@ class EvoAlgAPI(EA):
         """
         # TODO: Get new population from your EA
         # Make sure the returned array has shape (population_size, n_params)
+        population = np.array(self.es.ask())
+        return population
+        # "This should return an array of shape (population_size, n_params)."
 
-        raise NotImplementedError(
-            "TODO: Implement ask() to sample new population.\n"
-            "This should return an array of shape (population_size, n_params)."
-        )
 
     def tell(self, population: np.ndarray, fitnesses: np.ndarray, save_checkpoint: bool = False) -> None:
         """Update the algorithm with evaluated population.
@@ -75,6 +79,8 @@ class EvoAlgAPI(EA):
         # TODO: Update your EA with the evaluated population
         # Note: Some algorithms minimize, others maximize.
         # Adjust accordingly (negate fitnesses if needed).
+        self.es.tell(population, -fitnesses) #update state variables
+        #-> should be negated to maximize, not minimize
         
         # After updating the EA, do bookkeeping for checkpointing:
         self.full_f.append(fitnesses)
@@ -92,8 +98,10 @@ class EvoAlgAPI(EA):
             self.save_checkpoint()
         self.current_gen += 1
 
+        """
         raise NotImplementedError(
             "TODO: Implement tell() to update the EA.\n"
             "Pass the population and their fitness values to update the search distribution.\n"
             "Don't forget to add the bookkeeping code shown above for checkpointing!"
         )
+        """

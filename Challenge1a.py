@@ -12,6 +12,10 @@ from evorob.utils.filesys import get_last_checkpoint_dir
 from evorob.world.ant_world import AntFlatWorld
 from evorob.world.robot.controllers.mlp import NeuralNetworkController
 
+#because im on a mac
+import matplotlib
+matplotlib.use('Agg')
+
 """
     Controller optimisation: Ant flat terrain
 """
@@ -204,6 +208,11 @@ def run_evolution_neural_controller(
     # Create world for evaluation
     world = AntFlatWorld(controller_cls=NeuralNetworkController)
 
+    #run multiple iterations of the same phenotype
+    #world.env.close()
+    #world.env = world.create_env(n_repeats=3)
+    #world.n_repeats = 3
+
     # Timestamped checkpoint directory
     dt_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     if checkpoint_path is None:
@@ -222,6 +231,7 @@ def run_evolution_neural_controller(
     ea = EvoAlgAPI(
         num_params, population_size=population_size, sigma=0.5, output_dir=ckpt_dir
     )
+    #sigma was originall 0.5
 
     # Evolution loop (checkpointing happens automatically in ea.tell())
     for generation in range(num_generations):
@@ -436,8 +446,8 @@ if __name__ == "__main__":
 
     # Uncomment to run full evolution:
     run_evolution_neural_controller(
-        num_generations=100,
-        population_size=10,
+        num_generations=300,
+        population_size=50,
         ckpt_interval=5,
         checkpoint_path=None,
         run_evaluation=True,
@@ -450,6 +460,6 @@ if __name__ == "__main__":
     # on the standard Gymnasium Ant-v5 and get your final score + video.
     # Replace the path with your actual checkpoint folder.
     # ----------------------------------------------------------------
-    # evaluate_checkpoint(
-    #     checkpoint_dir="results/20260304_174619_neural_controller_ckpts",
-    # )
+    evaluate_checkpoint(
+         checkpoint_dir="results/20260304_174619_neural_controller_ckpts",
+     )

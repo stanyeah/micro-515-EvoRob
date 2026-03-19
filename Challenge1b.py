@@ -12,6 +12,9 @@ from evorob.utils.filesys import get_last_checkpoint_dir
 from evorob.world.ant_world import AntFlatWorld
 from evorob.world.robot.controllers.sinoid import OscillatoryController
 
+#because im on a mac
+import matplotlib
+matplotlib.use('Agg')
 
 def test_exercise_implementation():
     print("\n" + "=" * 60)
@@ -172,8 +175,9 @@ def run_evolution_oscillatory_controller(
     # Create evolutionary algorithm with checkpointing
     num_params = world.n_params
     ea = EvoAlgAPI(
-        num_params, population_size=population_size, sigma=0.5, output_dir=ckpt_dir
+        num_params, population_size=population_size, sigma=1.0, output_dir=ckpt_dir
     )
+    #original sigma was 0.5
 
     # Evolution loop (checkpointing happens automatically in ea.tell())
     for generation in range(num_generations):
@@ -182,7 +186,9 @@ def run_evolution_oscillatory_controller(
         fitness = np.empty(len(population))
 
         for i, individual in enumerate(population):
+            #fitness[i] = world.evaluate_individual(individual, trial_time=5)
             fitness[i] = world.evaluate_individual(individual)
+            #fitness[i] = world.evaluate_individual(individual) original trial time is 20 sec
 
         # Tell EA the results
         save_checkpoint = (generation % ckpt_interval == 0) or (
@@ -287,7 +293,9 @@ def evaluate_checkpoint(
 
     # --- Run evaluation episodes on the real Ant-v5 ---
     env = gym.make(
-        "Ant-v5", use_contact_forces=False, max_episode_steps=max_episode_steps
+        #"Ant-v5", use_contact_forces=False, max_episode_steps=max_episode_steps
+        "Ant-v5", include_cfrc_ext_in_observation=False, max_episode_steps=max_episode_steps
+        #changed because of my version of gymnasium
     )
     rng = np.random.default_rng(seed)
     episode_rewards = []
@@ -320,7 +328,9 @@ def evaluate_checkpoint(
     print("\nRecording video...")
     video_env = gym.make(
         "Ant-v5",
-        use_contact_forces=False,
+        #use_contact_forces=False,
+        include_cfrc_ext_in_observation=False,
+        #changed because of my version of gymnasium
         max_episode_steps=max_episode_steps,
         render_mode="rgb_array",
     )
@@ -380,7 +390,7 @@ if __name__ == "__main__":
     # Uncomment to run full evolution:
     run_evolution_oscillatory_controller(
         num_generations=100,
-        population_size=10,
+        population_size=100,
         ckpt_interval=5,
         checkpoint_path=None,
         run_evaluation=True,
@@ -392,6 +402,6 @@ if __name__ == "__main__":
     # on the standard Gymnasium Ant-v5 and get your final score + video.
     # Replace the path with your actual checkpoint folder.
     # ----------------------------------------------------------------
-    # evaluate_checkpoint(
-    #     checkpoint_dir="results/REPLACE_WITH_YOUR_CHECKPOINT_FOLDER",
-    # )
+    evaluate_checkpoint(
+        checkpoint_dir="results/REPLACE_WITH_YOUR_CHECKPOINT_FOLDER",
+    )
