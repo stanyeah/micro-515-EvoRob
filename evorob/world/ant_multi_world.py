@@ -3,7 +3,7 @@ from gymnasium.vector.sync_vector_env import SyncVectorEnv
 from gymnasium.wrappers import ClipAction, TimeLimit
 
 from evorob.world.base import World
-from evorob.world.envs.ant_flat_sol import AntFlatEnvironment
+from evorob.world.envs.ant_flat import AntFlatEnvironment
 from evorob.world.robot.controllers.base import Controller
 from evorob.world.robot.controllers.mlp import NeuralNetworkController
 
@@ -11,8 +11,8 @@ from evorob.world.robot.controllers.mlp import NeuralNetworkController
 class AntMultiWorld(World):
     """Wrapper for the Ant environment for evolutionary optimization."""
 
-    def __init__(self, controller_cls: type[Controller] = NeuralNetworkController):
-        self.env = self.create_env()
+    def __init__(self, controller_cls: type[Controller] = NeuralNetworkController, **kwargs):
+        self.env = self.create_env(**kwargs)
         self.dt = self.env.envs[0].unwrapped.dt
         self.action_size = self.env.action_space.shape[1]
         self.obs_size = self.env.observation_space.shape[1]
@@ -31,6 +31,7 @@ class AntMultiWorld(World):
         assert n_repeats % 2 == 0, "n_repeats should be a multiple of 2 for evaluation."
 
         self.n_repeats = n_repeats
+        self.max_episode_steps = max_episode_steps
 
         def make_env(param):
             def _init():
