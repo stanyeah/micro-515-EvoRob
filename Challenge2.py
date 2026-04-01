@@ -1,6 +1,8 @@
 import os
 
-os.environ.setdefault("MUJOCO_GL", "egl")
+#os.environ.setdefault("MUJOCO_GL", "egl")
+#egl doesnt work on mac
+os.environ.setdefault("MUJOCO_GL", "glfw")
 
 from datetime import datetime
 from pathlib import Path
