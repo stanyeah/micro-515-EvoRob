@@ -589,7 +589,7 @@ def run_evolution_nsga(
     bounds: Tuple[float, float],
     n_parents: int,
     checkpoint_path: Optional[str] = None,
-) -> None:
+) -> str:
     """Run NSGA-II multi-objective evolutionary optimization."""
     np.random.seed(random_seed)
 
@@ -749,6 +749,8 @@ def run_evolution_nsga(
         else:
             print("Skipping interactive evaluation (no display available).")
 
+    return str(ckpt_dir)
+
 
 # ---------------------------------------------------------------------------
 # Standalone checkpoint utilities
@@ -810,27 +812,28 @@ if __name__ == "__main__":
     test_exercise_implementation()
 
     # Uncomment to run full NSGA-II evolution:
-    run_evolution_nsga(
-        num_generations=100,
-        population_size=10,
-        run_evaluation=False,
-        compute_score=True,
+    num_generations = 200
+    ckpt_path = run_evolution_nsga(
+        num_generations=num_generations,  #was 100
+        population_size=50,              #was 10    
+        run_evaluation=False,           #was False
+        compute_score=True,             #was True
         random_seed=42,
-        n_repeats=2,
-        mutation_prob=0.3,
-        crossover_prob=0.5,
-        bounds=(-1, 1),
-        n_parents=10,
-        ckpt_interval=5,
-        checkpoint_path=None,
+        n_repeats=2,                    #was 2
+        mutation_prob=0.5,              #was 0.3
+        crossover_prob=0.5,             #was 0.5
+        bounds=(-1, 1),                  #was (-1, 1)
+        n_parents=10,                    #was 10
+        ckpt_interval=5,                 #was 5
+        checkpoint_path=None,            #was None
     )
 
-    # Uncomment to replay your checkpoint
-    # replay_checkpoint(
-    #     checkpoint_path="./results/nsga_multi_terrain_ckpt/99"
-    # )
+    #Uncomment to replay your checkpoint
+    replay_checkpoint(
+        checkpoint_path=f"{ckpt_path}/{num_generations - 1}"
+    )
 
-    # Uncomment to plot Pareto fronts from checkpoint
-    # plot_pareto_fronts_from_checkpoint(
-    #     checkpoint_dir="./results/nsga_multi_terrain_ckpt/99"
-    # )
+    #Uncomment to plot Pareto fronts from checkpoint
+    plot_pareto_fronts_from_checkpoint(
+        checkpoint_dir=ckpt_path
+    )
