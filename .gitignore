@@ -2,6 +2,7 @@ results/*
 /*.xml
 *.mp4
 .DS_Store
+fitness_scatter.png
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
