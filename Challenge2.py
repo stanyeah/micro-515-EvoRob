@@ -18,6 +18,7 @@ from evorob.world.ant_multi_world import AntMultiWorld
 from evorob.world.ant_world import AntFlatWorld
 from evorob.world.envs.ant_flat import AntFlatEnvironment
 from evorob.world.robot.controllers.mlp import NeuralNetworkController
+#from evorob.world.robot.controllers.so2 import SO2Controller
 
 """
     Multi-objective optimisation: Ant two-terrains
@@ -256,6 +257,7 @@ def test_exercise_implementation():
 def inspect_ant_multi_world():
     """Test the AntMultiWorld environment."""
     world = AntMultiWorld(controller_cls=NeuralNetworkController)
+    #world = AntMultiWorld(controller_cls=SO2Controller)
     print(f"Observation space: {world.obs_size}")
     print(f"Action space: {world.action_size}")
     print(f"Controller parameters: {world.n_params}")
@@ -488,8 +490,10 @@ def evaluate_checkpoint(
     genotype = np.load(x_best_path)
     print(f"Loaded genotype from: {x_best_path}  (shape: {genotype.shape})")
 
-    controller = NeuralNetworkController(input_size=27, output_size=8, hidden_size=16)
+    controller = NeuralNetworkController(input_size=27, output_size=8)
+    #controller = SO2Controller(input_size=27, output_size=8, hidden_size=16)
     print(f"Controller: NeuralNetworkController  |  Parameters: {controller.n_params}\n")
+    #print(f"Controller: SO2Controller  |  Parameters: {controller.n_params}\n")
 
     # --- Evaluate on both environments ---
     terrains = {
@@ -536,6 +540,7 @@ def evaluate_checkpoint(
         f.write("MICRO-515 Challenge 2 - Evaluation Results\n")
         f.write("=" * 50 + "\n\n")
         f.write(f"Controller type : NeuralNetworkController\n")
+        #f.write(f"Controller type : SO2Controller\n")
         f.write(f"Checkpoint      : {checkpoint_dir}\n")
         f.write(f"Episodes/terrain: {n_episodes}\n\n")
 
@@ -595,6 +600,7 @@ def run_evolution_nsga(
 
     # Create world for evaluation
     world = AntMultiWorld(controller_cls=NeuralNetworkController, n_repeats=n_repeats)
+    #world = AntMultiWorld(controller_cls=SO2Controller, n_repeats=n_repeats)
 
     # Setup checkpoint directory
     dt_str = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -762,6 +768,7 @@ def replay_checkpoint(checkpoint_path: str):
 
     population = np.load(f"{checkpoint_path}/x.npy")
     world = AntMultiWorld(controller_cls=NeuralNetworkController)
+    #world = AntMultiWorld(controller_cls=SO2Controller)
 
     multi_fitness = np.empty((len(population), 2))
     for i, individual in enumerate(population):
@@ -814,18 +821,18 @@ if __name__ == "__main__":
     # Uncomment to run full NSGA-II evolution:
     num_generations = 200
     ckpt_path = run_evolution_nsga(
-        num_generations=num_generations,  #was 100
-        population_size=50,              #was 10    
-        run_evaluation=False,           #was False
-        compute_score=True,             #was True
-        random_seed=42,
-        n_repeats=2,                    #was 2
-        mutation_prob=0.5,              #was 0.3
-        crossover_prob=0.5,             #was 0.5
-        bounds=(-1, 1),                  #was (-1, 1)
-        n_parents=10,                    #was 10
-        ckpt_interval=5,                 #was 5
-        checkpoint_path=None,            #was None
+        num_generations=num_generations,
+        population_size=100,
+        run_evaluation=False,
+        compute_score=True,
+        random_seed=81,
+        n_repeats=6,
+        mutation_prob=0.4,
+        crossover_prob=0.3,
+        bounds=(-1, 1),
+        n_parents=100,
+        ckpt_interval=10,
+        checkpoint_path=None,
     )
 
     #Uncomment to replay your checkpoint

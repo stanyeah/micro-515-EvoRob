@@ -3,6 +3,7 @@ results/*
 *.mp4
 .DS_Store
 fitness_scatter.png
+RUN_TRACKER.md
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

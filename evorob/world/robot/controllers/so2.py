@@ -14,7 +14,7 @@ def RK45(state, A, dt):
 
 class SO2Controller(Controller):
 
-    def __init__(self, input_size: int,  output_size: int, hidden_size: int):
+    def __init__(self, input_size: int,  output_size: int, hidden_size: int = 16):
         """
         SO2 oscillator Controller. [https://www.nature.com/articles/s41467-024-50131-4]
         - Uses internal oscillators coupled via a weight matrix.

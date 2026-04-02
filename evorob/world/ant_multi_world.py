@@ -65,7 +65,11 @@ class AntMultiWorld(World):
         n_sim_steps = int(trial_time / self.dt)
 
         self.geno2pheno(genotype)
+        self.controller.reset_controller(batch_size=self.n_repeats)
+        #added this line so SO2 internal state gets initialized?
 
+
+        
         # Generate unique seeds for each environment in this evaluation
         seeds = [self._eval_counter * self.n_repeats + i for i in range(self.n_repeats)]
         self._eval_counter += 1
