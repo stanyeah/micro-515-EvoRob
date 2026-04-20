@@ -10,7 +10,7 @@ class NSGAII(EA):
     
     NSGA-II is a multi-objective evolutionary algorithm that uses:
     - Fast non-dominated sorting to rank solutions into Pareto fronts
-    - Crowding distance to maintain diversity within fronts
+    - Crowding distance to maintain diversity
     - Tournament selection based on rank and crowding distance
     - Mutation and crossover operators
     
@@ -103,8 +103,8 @@ class NSGAII(EA):
     def tell(self, population: np.ndarray, fitness: np.ndarray, save_checkpoint=False) -> None:
         """Updates the algorithm with the evaluated solutions and their fitness values.
         
-        Implements NSGA-II elitism by combining the current parent population with 
-        the new offspring population, then selecting the best n_pop individuals 
+        Implements NSGA-II elitism by combining the current parent population with
+        the new offspring population, then selecting the best n_pop individuals
         using non-dominated sorting and crowding distance.
         
         Args:
@@ -180,7 +180,7 @@ class NSGAII(EA):
 
     def create_children(self, population_size: int) -> np.ndarray:
         """Creates offspring using tournament selection, mutation and crossover.
-        
+
         Uses tournament selection based on Pareto rank and crowding distance
         to select parents, then applies differential evolution mutation.
         
@@ -288,23 +288,9 @@ class NSGAII(EA):
         Returns:
             bool: True if individual dominates other_individual.
         """
-        # TODO: Implement Pareto dominance check
-        # Use all() and any() to check the two conditions for dominance
-
-        
-        count = 0
-        for i in range(len(individual)):
-            if individual[i] < other_individual[i]:
-                return False
-            if individual[i] > other_individual[i]:
-                count+=1
-
-        if count >= 1:
-            return True
-        else:
-            return False
-    
-        # return all(individual >= other_individual) and any(individual > other_individual)
+        return all(x >= y for x, y in zip(individual, other_individual)) and any(
+            x > y for x, y in zip(individual, other_individual)
+        )
 
     def fast_nondominated_sort(self, fitness: np.ndarray) -> Tuple[List[List[int]], List[int]]:
         """Performs fast non-dominated sorting to rank solutions into Pareto fronts.
@@ -333,15 +319,13 @@ class NSGAII(EA):
             for individual_b in range(len(fitness)):
                 # does individual_a dominate individual_b?
                 if self.dominates(fitness[individual_a], fitness[individual_b]):
-                    # TODO: Track that individual_a dominates individual_b
+                    # Track that individual_a dominates individual_b
                     domination_lists[individual_a].append(individual_b)
-                    domination_counts[individual_b]+=1
 
-                # does individual_b dominate individual_a?
+                # does candidate 2 dominate candidate 1?
                 elif self.dominates(fitness[individual_b], fitness[individual_a]):
-                    # TODO: Track that individual_a is dominated by individual_b
-                    domination_lists[individual_b].append(individual_a)
-                    domination_counts[individual_a]+=1
+                    # Track that individual_a is dominated by individual_b
+                    domination_counts[individual_a] += 1
 
             # if solution dominates all
             if domination_counts[individual_a] == 0:
@@ -361,12 +345,15 @@ class NSGAII(EA):
             for individual_a in pareto_fronts[i]:
                 # check all other items which are dominated by this item
                 for individual_b in domination_lists[individual_a]:
-                    # TODO: Update domination count and check if individual_b
+                    # Update domination count and check if individual_b
                     # should be added to the next front
-                    domination_counts[individual_b]-=1
+                    domination_counts[individual_b] -= 1
+
+                    # every now nondominated item are append to next front
                     if domination_counts[individual_b] == 0:
-                        next_front.append(individual_b)
+                        # add solution rank
                         population_rank[individual_b] = i + 1
+                        next_front.append(individual_b)
 
             i += 1
 
@@ -400,24 +387,36 @@ class NSGAII(EA):
         # Initialize distances to zero
         distance = np.zeros(n_solutions)
 
-        # TODO: For each objective:
+        # For each objective:
         # 1. Sort the front by that objective
         # 2. Assign infinite distance to boundary solutions
         # 3. Compute normalized distance for interior solutions
 
-        for i in range(n_objectives):
-            sorted_front = np.argsort(fitness[front, i])
-            obj_range = fitness[front[sorted_front[-1]], i] - fitness[front[sorted_front[0]], i] #to avoid divide by zero
+        for m in range(n_objectives):
+            # Sort front by objective m
+            sorted_indices = np.argsort(fitness[front, m])
+
+            # Assign infinite distance to boundary solutions
+            distance[sorted_indices[0]] = np.inf
+            distance[sorted_indices[-1]] = np.inf
+
+            # Get objective range
+            obj_min = fitness[front[sorted_indices[0]], m]
+            obj_max = fitness[front[sorted_indices[-1]], m]
+            obj_range = obj_max - obj_min
+
+            # Avoid division by zero
             if obj_range == 0:
                 continue
-            distance[sorted_front[0]] = np.inf
-            distance[sorted_front[-1]] = np.inf
-            for j in range(1, n_solutions-1):
-                distance[sorted_front[j]] += (fitness[front[sorted_front[j+1]], i] - fitness[front[sorted_front[j-1]], i]) / obj_range
 
+            # Calculate crowding distance for interior solutions
+            for i in range(1, n_solutions - 1):
+                distance[sorted_indices[i]] += (
+                    fitness[front[sorted_indices[i + 1]], m] - 
+                    fitness[front[sorted_indices[i - 1]], m]
+                ) / obj_range
+        
         return distance
-        
-        
 
     def crowding_operator(self, individual_idx: int, other_individual_idx: int,
                           population_rank: List[int], crowding_distances: np.ndarray) -> int:
@@ -437,18 +436,20 @@ class NSGAII(EA):
         Returns:
             int: Index of the preferred individual.
         """
-        # TODO: Compare two individuals
+        # Compare two individuals
         # 1. Prefer lower rank (better Pareto front)
         # 2. If same rank, prefer larger crowding distance
+
         if population_rank[individual_idx] < population_rank[other_individual_idx]:
             return individual_idx
         elif population_rank[individual_idx] > population_rank[other_individual_idx]:
             return other_individual_idx
+
+        # If same rank, prefer larger crowding distance (more isolated, better for diversity)
+        if crowding_distances[individual_idx] >= crowding_distances[other_individual_idx]:
+            return individual_idx
         else:
-            if crowding_distances[individual_idx] > crowding_distances[other_individual_idx]:
-                return individual_idx
-            else:
-                return other_individual_idx
+            return other_individual_idx
 
     def tournament_selection(self, population_rank: List[int],
                              crowding_distances: np.ndarray,
