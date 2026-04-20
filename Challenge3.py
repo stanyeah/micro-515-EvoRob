@@ -44,7 +44,9 @@ class AntWorld(World):
                                         hidden_size=action_space)
 
         self.n_weights = self.controller.n_params
-        self.n_body_params = 8
+        # Use a compact body encoding: one upper-leg length + one lower-leg length.
+        # The same pair is shared across all four legs to reduce genotype size.
+        self.n_body_params = 2
 
         self.n_params = self.n_weights + self.n_body_params
         self.temp_dir = TemporaryDirectory()
@@ -101,7 +103,13 @@ class AntWorld(World):
 
         self.controller.geno2pheno(control_weights)
 
-        front_left_leg, front_left_ankle, front_right_leg, front_right_ankle, back_left_leg, back_left_ankle, back_right_leg, back_right_ankle, = body_params
+        #front_left_leg, front_left_ankle, front_right_leg, front_right_ankle, back_left_leg, back_left_ankle, back_right_leg, back_right_ankle, = body_params
+        # Shared morphology across legs:
+        # - body_params[0]: upper leg length
+        # - body_params[1]: lower leg length
+        upper_leg, lower_leg = body_params
+        front_left_leg = front_right_leg = back_left_leg = back_right_leg = upper_leg
+        front_left_ankle = front_right_ankle = back_left_ankle = back_right_ankle = lower_leg
 
         # Define the 3D coordinates of the relative tree structure
         front_left_hip_xyz = np.array([0.2, 0.2, 0])
@@ -156,9 +164,9 @@ class AntWorld(World):
         # 1. Create the Slope (Gradient along X)
         # 0.0 at the back, 1.0 at the front
         # TODO: Change the terrain parameters
-        slope_deg = 0.0
-        bump_scale = 0.0
-        sigma = 1.0
+        slope_deg = 5.0                     # slope of the terrain
+        bump_scale = 0.1                    # scale of the bumps (height of the bumps)
+        sigma = 3.0                         # standard deviation of the bumps   
 
         # 1. Create Linear Slope (Gradient along X)
         rise = np.tan(np.deg2rad(slope_deg))
@@ -494,10 +502,10 @@ def main():
 
     result_dir = ...
     prev_best = ... # load previous run
-    genotype[:-8] = prev_best
+    genotype[:-world.n_body_params] = prev_best
 
-    genotype[-8::2] = ...  # fix upper leg length 0.2m
-    genotype[-7::2] = ...     # fix lower leg length 0.6m
+    genotype[-2] = -0.6  # upper leg length 0.2m
+    genotype[-1] = 0.2   # lower leg length 0.4m
     world.update_robot_xml(genotype)
     world.visualise_individual(genotype)
 
