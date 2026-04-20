@@ -101,7 +101,7 @@ The given exercise should provide a fundamental understanding of practical aspec
 </div>
 
 To master Challenge 3, submit:
-- **Data**: Your best genotype for the MLP+8 body params (size 288) as `x_best.npy`
+- **Data**: Your best genotype (controller+body) as `x_best.npy`
 - **Code**: Your `ant_hill.npy` `Challenge3.py`
 - **Pareto Front Visualization**: A plot showing the final Pareto front with both objectives
 - **Morphology Comparison**: Table or plots analysing morphological parameters of the specialists and generalist

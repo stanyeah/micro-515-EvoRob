@@ -6,6 +6,7 @@ from PIL import Image
 import scipy.ndimage
 
 import gymnasium as gym
+import imageio
 import numpy as np
 from gymnasium.vector import AsyncVectorEnv
 from tqdm import trange
@@ -223,6 +224,235 @@ class AntWorld(World):
         return np.mean(final_rewards), np.mean(final_multi_obj_rewards, axis=0)
 
 
+# ---------------------------------------------------------------------------
+# Evaluation helpers (Challenge 3)
+# ---------------------------------------------------------------------------
+
+def _run_episodes_hill(world, genotype, n_episodes, max_episode_steps, seed):
+    """Run n_episodes on the hill terrain, returning per-episode stats.
+
+    Returns:
+        episode_rewards: total reward per episode
+        episode_obj1:    cumulative (reward_forward + healthy_reward) per episode
+        episode_obj2:    cumulative (-ctrl_cost) per episode
+    """
+    world.update_robot_xml(genotype)
+    env = gym.make(
+        ENV_NAME,
+        robot_path=world.world_file,
+        max_episode_steps=max_episode_steps,
+    )
+
+    rng = np.random.default_rng(seed)
+    episode_rewards, episode_obj1, episode_obj2 = [], [], []
+
+    for _ in range(n_episodes):
+        ep_seed = int(rng.integers(0, 2**31))
+        obs, _ = env.reset(seed=ep_seed)
+        world.controller.reset_controller(batch_size=1)
+
+        total_reward = total_obj1 = total_obj2 = 0.0
+        for _ in range(max_episode_steps):
+            action = world.controller.get_action(obs)
+            if action.ndim > 1:
+                action = action.squeeze(0)
+            obs, reward, terminated, truncated, info = env.step(action)
+            total_reward += reward
+            total_obj1 += float(info.get("reward_forward", 0.0)) + float(info.get("healthy_reward", 0.0))
+            total_obj2 += -float(info.get("ctrl_cost", 0.0))
+            if terminated or truncated:
+                break
+
+        episode_rewards.append(total_reward)
+        episode_obj1.append(total_obj1)
+        episode_obj2.append(total_obj2)
+
+    env.close()
+    return episode_rewards, episode_obj1, episode_obj2
+
+
+def _record_video_hill(world, genotype, max_steps, seed, out_path):
+    """Record one episode to out_path. Returns episode reward or None on failure."""
+    try:
+        world.update_robot_xml(genotype)
+        env = gym.make(
+            ENV_NAME,
+            robot_path=world.world_file,
+            max_episode_steps=max_steps,
+            render_mode="rgb_array",
+        )
+        world.controller.reset_controller(batch_size=1)
+        obs, _ = env.reset(seed=seed)
+        frames, video_reward = [], 0.0
+
+        for _ in range(max_steps):
+            frames.append(env.render())
+            action = world.controller.get_action(obs)
+            if action.ndim > 1:
+                action = action.squeeze(0)
+            obs, reward, terminated, truncated, _ = env.step(action)
+            video_reward += reward
+            if terminated or truncated:
+                break
+
+        env.close()
+        imageio.mimwrite(out_path, frames, fps=20)
+        print(f"  Video saved: {out_path}")
+        return video_reward
+    except Exception as e:
+        print(f"  Warning: video skipped ({e})")
+        return None
+
+
+def _stats(values):
+    a = np.asarray(values, dtype=float)
+    return {
+        "values": list(values),
+        "mean": float(np.mean(a)),
+        "std":  float(np.std(a)),
+        "best": float(np.max(a)),
+        "worst": float(np.min(a)),
+        "median": float(np.median(a)),
+    }
+
+
+def evaluate_checkpoint(
+    checkpoint_dir: str,
+    output_dir: str = "evaluation_output",
+    n_episodes: int = 256,          # set to 256 for submission; lower for testing
+):
+    """Evaluate a Challenge-3 NSGA-II checkpoint on the hilly terrain.
+
+    Identifies two specialists (best per objective) and a generalist (best
+    combined score) from the last checkpoint's population, evaluates each for
+    n_episodes, records three videos, and writes a score file.
+
+    The controller type and genotype size are taken from the AntWorld default
+    (whatever the student configured), so no hardcoded assumptions are made.
+    Objectives: [reward_forward + healthy_reward,  -ctrl_cost].
+
+    Args:
+        checkpoint_dir: Path to your NSGA-II checkpoint folder.
+        output_dir:     Where to save the score file and videos.
+        n_episodes:     Episodes per individual (256 for submission).
+    """
+    max_episode_steps: int = 1000  # DO NOT CHANGE!
+    seed: int = 0                  # DO NOT CHANGE!
+
+    # --- Locate checkpoint files ---
+    last_gen = get_last_checkpoint_dir(checkpoint_dir)
+
+    def _try_load(filename):
+        for d in ([last_gen] if last_gen else []) + [checkpoint_dir]:
+            p = os.path.join(d, filename)
+            if os.path.isfile(p):
+                return np.load(p, allow_pickle=True)
+        return None
+
+    x_best = _try_load("x_best.npy")
+    if x_best is None:
+        print(f"ERROR: Could not find x_best.npy in '{checkpoint_dir}'.")
+        return None
+
+    population = _try_load("x.npy")
+    fitness    = _try_load("f.npy")
+    print(f"Loaded x_best  (shape: {x_best.shape})")
+
+    # --- Identify specialist and generalist genotypes ---
+    if (population is not None and fitness is not None
+            and fitness.ndim == 2 and fitness.shape[1] >= 2):
+        spec1_idx = int(np.argmax(fitness[:, 0]))           # best forward+healthy
+        spec2_idx = int(np.argmax(fitness[:, 1]))           # best efficiency
+        gen_idx   = int(np.argmax(np.sum(fitness, axis=1))) # pareto-knee proxy
+        spec1_g, spec2_g, gen_g = population[spec1_idx], population[spec2_idx], population[gen_idx]
+        print(f"Specialist obj1 (forward): idx={spec1_idx}  f={fitness[spec1_idx]}")
+        print(f"Specialist obj2 (effic.) : idx={spec2_idx}  f={fitness[spec2_idx]}")
+        print(f"Generalist (best sum)    : idx={gen_idx}    f={fitness[gen_idx]}")
+    else:
+        print("Warning: population/fitness not found — using x_best for all three roles.")
+        spec1_g = spec2_g = gen_g = x_best
+
+    # --- AntWorld uses whatever controller the student configured ---
+    world = AntWorld()
+    controller_name = type(world.controller).__name__
+    print(f"Controller: {controller_name}  |  params={world.controller.n_params}  |  genotype size={world.n_params}\n")
+
+    individuals = {
+        "specialist_obj1": spec1_g,
+        "specialist_obj2": spec2_g,
+        "generalist":      gen_g,
+    }
+
+    # --- Run episodes ---
+    results = {}
+    for label, genotype in individuals.items():
+        print(f"Evaluating {label} ({n_episodes} episodes)...")
+        rewards, obj1_vals, obj2_vals = _run_episodes_hill(
+            world, genotype, n_episodes, max_episode_steps, seed
+        )
+        results[label] = {
+            "reward": _stats(rewards),
+            "obj1":   _stats(obj1_vals),
+            "obj2":   _stats(obj2_vals),
+        }
+        r = results[label]
+        print(f"  reward: {r['reward']['mean']:.2f} +/- {r['reward']['std']:.2f}  "
+              f"obj1: {r['obj1']['mean']:.2f}  obj2: {r['obj2']['mean']:.2f}")
+
+    # --- Record videos ---
+    os.makedirs(output_dir, exist_ok=True)
+    video_names = {
+        "specialist_obj1": "specialist_forward",
+        "specialist_obj2": "specialist_efficiency",
+        "generalist":      "generalist",
+    }
+    for label, genotype in individuals.items():
+        vpath = os.path.join(output_dir, f"evaluation_{video_names[label]}.mp4")
+        _record_video_hill(world, genotype, max_episode_steps, seed, vpath)
+
+    # --- Score file ---
+    score_path = os.path.join(output_dir, "evaluation_score.txt")
+    with open(score_path, "w") as f:
+        f.write("=" * 60 + "\n")
+        f.write("MICRO-515 Challenge 3 - Evaluation Results\n")
+        f.write("=" * 60 + "\n\n")
+        f.write(f"Controller      : {controller_name} ({world.controller.n_params} params)\n")
+        f.write(f"Genotype size   : {world.n_params}  (weights={world.controller.n_params}, body={world.n_body_params})\n")
+        f.write(f"Checkpoint      : {checkpoint_dir}\n")
+        f.write(f"Episodes/indiv. : {n_episodes}\n")
+        f.write(f"Objectives      : [reward_forward+healthy_reward, -ctrl_cost]\n\n")
+
+        f.write("=" * 72 + "\n")
+        f.write("SUMMARY\n")
+        f.write("=" * 72 + "\n")
+        f.write(f"{'Individual':<22s} {'Rew.Mean':>9s} {'Rew.Std':>8s} {'Rew.Best':>9s} "
+                f"{'Obj1.Mean':>10s} {'Obj2.Mean':>10s}\n")
+        f.write("-" * 72 + "\n")
+        for label in individuals:
+            r = results[label]
+            f.write(f"{label:<22s} {r['reward']['mean']:9.2f} {r['reward']['std']:8.2f} "
+                    f"{r['reward']['best']:9.2f} {r['obj1']['mean']:10.2f} {r['obj2']['mean']:10.2f}\n")
+        f.write("\n")
+
+        for label in individuals:
+            r = results[label]
+            f.write("-" * 50 + "\n")
+            f.write(f"{label.upper()} — Per-episode rewards\n")
+            f.write("-" * 50 + "\n")
+            for i, rew in enumerate(r["reward"]["values"]):
+                f.write(f"  Episode {i + 1:3d}: {rew:10.2f}\n")
+            f.write("\n")
+
+    print(f"\nScore saved to: {score_path}")
+    print("=" * 60)
+    for label in individuals:
+        r = results[label]
+        print(f"  {label:<22s}: reward={r['reward']['mean']:.2f} +/-{r['reward']['std']:.2f}"
+              f"  obj1={r['obj1']['mean']:.2f}  obj2={r['obj2']['mean']:.2f}")
+    print("=" * 60)
+    return results
+
+
 def run_EA_single(ea_single, world):
     for _ in trange(ea_single.n_gen):
         pop = ea_single.ask()
@@ -249,7 +479,7 @@ def main():
     n_parameters = world.n_params
 
     #%% Understanding the world
-    genotype = np.random.uniform(-1,1, n_parameters)
+    genotype = np.random.uniform(-1, 1, n_parameters)
     world.update_robot_xml(genotype)
     world.visualise_individual(genotype)
 
@@ -266,13 +496,12 @@ def main():
     prev_best = ... # load previous run
     genotype[:-8] = prev_best
 
-    genotype[-8::2] = ...  # fix upper leg length 0.2
-    genotype[-7::2] = ...     # fix lower leg length 0.6
+    genotype[-8::2] = ...  # fix upper leg length 0.2m
+    genotype[-7::2] = ...     # fix lower leg length 0.6m
     world.update_robot_xml(genotype)
     world.visualise_individual(genotype)
 
-
-    # %% Evolve open-loop so2
+    #%% Evolve open-loop so2
     world = AntWorld()
     world.n_weights = world.controller.n_params
     world.n_params = world.n_weights + world.n_body_params
@@ -282,9 +511,10 @@ def main():
     opts["min"] = -1
     opts["max"] = 1
     opts["mutation_sigma"] = 0.3
+    opts["num_generations"] = 100
 
     results_dir = join(ROOT_DIR, "results", ENV_NAME, "single")
-    ea_single = CMAES(population_size, n_parameters, opts, results_dir)
+    ea_single = CMAES(n_parameters, population_size, opts["num_generations"], results_dir)
 
     run_EA_single(ea_single, world)
 
