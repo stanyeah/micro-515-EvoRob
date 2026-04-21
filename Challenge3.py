@@ -216,8 +216,12 @@ class AntWorld(World):
             # TODO: design appropriate rewards
             rewards_full[step, ~done_mask] = rewards[~done_mask]
 
-            # TODO: design appropriate moo-rewards
-            multi_obj_reward = np.array([infos["z_velocity"], -infos["ctrl_cost"]]).T # TODO
+            # Multi-objective fitness for Q3.3:
+            # 1) forward progress + staying healthy, 2) minimize control effort.
+            multi_obj_reward = np.array([
+                infos["reward_forward"] + infos["healthy_reward"],
+                -infos["ctrl_cost"],
+            ]).T
             multi_obj_rewards_full[step, ~done_mask] = multi_obj_reward[~done_mask]
 
             # Update the done mask based on the "done" and "truncated" flags
@@ -461,12 +465,16 @@ def evaluate_checkpoint(
     return results
 
 
-def run_EA_single(ea_single, world):
+def run_EA_single(ea_single, world, n_repeats=10, n_steps=500):
     for _ in trange(ea_single.n_gen):
         pop = ea_single.ask()
         fitnesses_gen = np.empty(len(pop))
         for index, genotype in enumerate(pop):
-            fit_ind, _ = world.evaluate_individual(genotype)
+            fit_ind, _ = world.evaluate_individual(
+                genotype,
+                n_repeats=n_repeats,
+                n_steps=n_steps,
+            )
             fitnesses_gen[index] = fit_ind
         ea_single.tell(pop, fitnesses_gen, save_checkpoint=True)
 
@@ -482,51 +490,64 @@ def run_EA_multi(ea_multi, world):
 
 
 def main():
+    print("[Stage 0] Starting Challenge3 pipeline...")
     #%% Optimise single-objective
     world = AntWorld()
     n_parameters = world.n_params
 
     #%% Understanding the world
-    genotype = np.random.uniform(-1, 1, n_parameters)
-    world.update_robot_xml(genotype)
-    world.visualise_individual(genotype)
+    print("[Stage 1] Visualising random genotype")
+    # genotype = np.random.uniform(-1, 1, n_parameters)
+    # world.update_robot_xml(genotype)
+    # world.visualise_individual(genotype, n_steps = 1000) #50000 default for n_steps bruh
 
     # TODO Overwrite controller and load best run exercise 1
-    state_space = ...
-    action_space = ... # Change controller
-    world.controller = NeuralNetworkController(...,
-                                               ...,
-                                               ...)
+    print("[Stage 2] Q3.2 transfer test: MLP + x_best + fixed long legs...")
+    state_space = 27
+    action_space = 8 # Change controller
+    world.controller = NeuralNetworkController(input_size=state_space,
+                                               output_size=action_space,
+                                               hidden_size=16
+                                               )
     world.n_weights = world.controller.n_params
     world.n_params = world.n_weights + world.n_body_params
 
-    result_dir = ...
-    prev_best = ... # load previous run
+    result_dir = join(ROOT_DIR, "results", "20260421_182436_neural_controller_ckpts")
+    prev_best = np.load(join(ROOT_DIR, "x_best.npy"))  # load previous run
+    # Reinitialize genotype for the new controller dimensionality (MLP + body).
+    genotype = np.random.uniform(-1, 1, world.n_params)
     genotype[:-world.n_body_params] = prev_best
 
-    genotype[-2] = -0.6  # upper leg length 0.2m
-    genotype[-1] = 0.2   # lower leg length 0.4m
+    genotype[-2] = -0.2  # upper leg length 0.3m
+    genotype[-1] = 0.6   # lower leg length 0.5m
     world.update_robot_xml(genotype)
     world.visualise_individual(genotype)
 
     #%% Evolve open-loop so2
+    print("[Stage 3] Q3.3 single-objective: CMA-ES on SO2 + body parameters...")
     world = AntWorld()
     world.n_weights = world.controller.n_params
     world.n_params = world.n_weights + world.n_body_params
     n_parameters = world.n_params
-    population_size = 150
-    opts = CMAES_opts.copy()
-    opts["min"] = -1
-    opts["max"] = 1
-    opts["mutation_sigma"] = 0.3
-    opts["num_generations"] = 100
+    population_size = 10       #default was 150
+    num_generations = 10       #default was 100
+    sigma = 0.3                 #default was 0.3
+    bounds = (-1, 1)            #default was (-1, 1)
 
     results_dir = join(ROOT_DIR, "results", ENV_NAME, "single")
-    ea_single = CMAES(n_parameters, population_size, opts["num_generations"], results_dir)
+    ea_single = EvoAlgAPI(
+        n_params=n_parameters,
+        population_size=population_size,
+        num_generations=num_generations,
+        sigma=sigma,
+        bounds=bounds,
+        output_dir=results_dir,
+    )
 
-    run_EA_single(ea_single, world)
+    run_EA_single(ea_single, world, n_repeats=4, n_steps=300)
 
     #%% visualise
+    print("[Stage 4] Rendering best CMA-ES individual to video...")
     checkpoint = get_last_checkpoint_dir(results_dir)
     best_individual = np.load(join(results_dir, checkpoint, "x_best.npy"))
     world.update_robot_xml(best_individual)
@@ -537,6 +558,7 @@ def main():
 
 
     #%% Optimise multi-objective
+    print("[Stage 5] Running NSGA-II multi-objective optimisation...")
     world = AntWorld()
     state_space = 27
     action_space = 8 # Change controller
@@ -570,6 +592,7 @@ def main():
     run_EA_multi(ea_multi_obj, world)
 
     #%% visualise
+    print("[Stage 6] Rendering best NSGA-II individual to video...")
     checkpoint = get_last_checkpoint_dir(results_dir)
     best_individual = np.load(join(results_dir, checkpoint, "x_best.npy"), allow_pickle=True)
     world.update_robot_xml(best_individual)
