@@ -125,13 +125,25 @@ class AntHillEnv(MujocoEnv, utils.EzPickle):
         xyz_velocity = (xyz_position_after - xyz_position_before) / self.dt
         x_velocity, y_velocity, z_velocity = xyz_velocity
 
-        forward_reward = x_velocity * self._forward_reward_weight
-        healthy_reward = 1
-        ctrl_cost = np.sum(action**2)  * self._ctrl_cost_weight
-        cfrc_cost = np.sum( self.data.cfrc_ext[1:]**2) * self._cfrc_cost_weight
+        forward_reward = 1.5 * x_velocity * self._forward_reward_weight
+        healthy_reward = 0.1 #was 1 default
+        ctrl_cost = np.sum(action**2)  * self._ctrl_cost_weight *0.7 / 0.5
+            #ctrl_cost_weight is set to 0.5
+        cfrc_cost = np.sum( self.data.cfrc_ext[1:]**2) * self._cfrc_cost_weight * 0.01
+            #constant multiplied at the end is by me
+        #cfrc_cost = 0.0
+
+        #remove points if stuck in one place for too long (no farming survival reward)
+        if np.abs(x_velocity) < 0.03:
+            self.stuck += 1
+        else:
+            self.stuck = 0
+        stuck_penalty = 0.0
+        if self.stuck > 30:
+            stuck_penalty = 0.75
 
         #TODO change the reward for hill terrain
-        reward = healthy_reward + forward_reward -ctrl_cost -cfrc_cost
+        reward = healthy_reward + forward_reward -ctrl_cost -cfrc_cost - stuck_penalty
         observation = self._get_obs()
 
         info = {
@@ -145,6 +157,8 @@ class AntHillEnv(MujocoEnv, utils.EzPickle):
             "x_velocity": x_velocity,
             "y_velocity": y_velocity,
             "z_velocity": z_velocity,
+            "stuck_penalty": stuck_penalty,
+            "stuck_steps": self.stuck,
         }
         terminated = False
         # Check for NaN, Inf, or huge values
@@ -155,7 +169,7 @@ class AntHillEnv(MujocoEnv, utils.EzPickle):
             DOF = np.argwhere((np.isnan(qacc)) + (np.isinf(qacc)) + (np.abs(qacc) > 1e6)).squeeze()[0]
             print(ValueError(f'MuJoCo Warning: Nan, Inf or huge value in QACC at DOF {DOF}'))
             terminated = True
-        if self.data.qpos[2] < 0.2 or self.data.qpos[2] > 1.0:
+        if self.data.qpos[2] < 0.2 or self.data.qpos[2] > 5.0:
             terminated = True
         if terminated:
             info["healthy_reward"] = -10
