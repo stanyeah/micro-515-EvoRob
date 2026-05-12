@@ -2,6 +2,12 @@ results/*
 /*.xml
 *.mp4
 
+# Local artifacts / scratch (not part of course repo)
+Old Results/
+Challenge2 Stuff/
+RUN_TRACKER.md
+.DS_Store
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
