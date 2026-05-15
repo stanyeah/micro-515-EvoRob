@@ -133,6 +133,12 @@ class FinalWorld(World):
         #   self.controller = NeuralNetworkController(input_size=14, ...)
         self.sensor_fn = None
 
+        # When False, _run_env evaluates n_repeats episodes sequentially in a
+        # single process (no AsyncVectorEnv subprocesses).  Set to False inside
+        # multiprocessing.Pool workers, since daemonic pool workers cannot spawn
+        # their own subprocesses.  Defaults to True for legacy single-process runs.
+        self.use_async_vector_env = True
+
         self._create_terrain_file("terrain.png")
 
     # ------------------------------------------------------------------
@@ -271,7 +277,16 @@ class FinalWorld(World):
     # ------------------------------------------------------------------
 
     def _run_env(self, env_id: str, world_file: str, n_repeats: int, n_steps: int) -> float:
-        """Run n_repeats parallel episodes and return the mean total reward."""
+        """Run n_repeats episodes and return the mean total reward.
+
+        If use_async_vector_env is True (default), n_repeats episodes run in
+        parallel via gymnasium's AsyncVectorEnv.  If False, they run sequentially
+        in this process (used inside multiprocessing.Pool workers, which cannot
+        themselves spawn AsyncVectorEnv subprocesses).
+        """
+        if not self.use_async_vector_env:
+            return self._run_env_serial(env_id, world_file, n_repeats, n_steps)
+
         envs = AsyncVectorEnv([
             (lambda eid, wf: lambda: gym.make(
                 eid, robot_path=wf, max_episode_steps=n_steps
@@ -295,6 +310,34 @@ class FinalWorld(World):
                 break
         envs.close()
         return float(rewards.sum(axis=0).mean())
+
+    def _run_env_serial(self, env_id: str, world_file: str, n_repeats: int, n_steps: int) -> float:
+        """Run n_repeats episodes one after another in a single process.
+
+        Used inside multiprocessing.Pool workers where AsyncVectorEnv cannot run.
+        Outer-loop parallelism (across the population) gives the speedup instead.
+        """
+        env = gym.make(env_id, robot_path=world_file, max_episode_steps=n_steps)
+        episode_totals = np.zeros(n_repeats)
+        for r in range(n_repeats):
+            self.controller.reset_controller(batch_size=1)
+            obs, _ = env.reset()
+            if self.sensor_fn is not None:
+                obs = self.sensor_fn(obs)
+            total = 0.0
+            for t in range(n_steps):
+                action = self.controller.get_action(obs)
+                if action.ndim > 1:
+                    action = action.squeeze(0)
+                obs, reward, terminated, truncated, _ = env.step(action)
+                if self.sensor_fn is not None:
+                    obs = self.sensor_fn(obs)
+                total += float(reward)
+                if terminated or truncated:
+                    break
+            episode_totals[r] = total
+        env.close()
+        return float(episode_totals.mean())
 
     def _eval_flat(self, n_repeats: int = 4, n_steps: int = 500) -> float:
         return self._run_env("FlatEnv-v0", self.flat_world_file, n_repeats, n_steps)
@@ -518,6 +561,45 @@ def evaluate_checkpoint(
 
 
 # ---------------------------------------------------------------------------
+# Multiprocessing.Pool workers for population-parallel evaluation
+# ---------------------------------------------------------------------------
+#
+# When run_multi_task_evolution is called with n_workers > 1, NSGA-II's
+# population is dispatched across a Pool.  Each worker maintains a private
+# FinalWorld instance (its own temp_dir, its own controller state) so workers
+# never share mutable state.  Workers run n_repeats episodes sequentially via
+# _run_env_serial; outer parallelism (across the population) gives the speedup.
+#
+# These must be defined at module level so they are picklable / importable when
+# the Pool spawns child processes.
+
+_worker_world: "FinalWorld | None" = None
+
+
+def _worker_init(evolution_mode: str,
+                 fixed_body_genotype: np.ndarray | None) -> None:
+    """Per-worker initializer: build one FinalWorld in serial-eval mode."""
+    global _worker_world
+    _worker_world = FinalWorld(evolution_mode=evolution_mode)
+    _worker_world.use_async_vector_env = False
+    if fixed_body_genotype is not None:
+        _worker_world._fixed_body_genotype = np.asarray(
+            fixed_body_genotype, dtype=np.float64
+        ).reshape(-1)
+
+
+def _worker_eval(args):
+    """Evaluate one individual; return (idx, fitness, robot_xml_content)."""
+    idx, genotype, n_repeats, n_steps = args
+    fitness = _worker_world.evaluate_individual(
+        genotype, n_repeats=n_repeats, n_steps=n_steps
+    )
+    with open(join(_worker_world.temp_dir.name, "Robot.xml")) as f:
+        robot_xml = f.read()
+    return idx, fitness, robot_xml
+
+
+# ---------------------------------------------------------------------------
 # Main training loop
 # ---------------------------------------------------------------------------
 
@@ -525,7 +607,7 @@ def run_multi_task_evolution(
     num_generations: int = 100,
     population_size: int = 100,
     n_parents:       int = 50,
-    n_repeats:       int = 4,
+    n_repeats:       int = 3,
     n_steps:         int = 500,
     mutation_prob:   float = 0.3,
     crossover_prob:  float = 0.5,
@@ -534,6 +616,7 @@ def run_multi_task_evolution(
     results_dir:     str = None,
     random_seed:     int = 42,
     evolution_mode:  str | None = None,
+    n_workers:       int = 1,
 ) -> None:
     np.random.seed(random_seed)
 
@@ -560,6 +643,7 @@ def run_multi_task_evolution(
 
     n_obj = 3
     print(f"\nRunning {num_generations} generations  pop={population_size}")
+    print(f"Workers    : {n_workers}")
     print(f"Objectives : [flat, ice, hill]")
     print(f"Checkpoints: {results_dir}\n")
 
@@ -570,30 +654,66 @@ def run_multi_task_evolution(
     _best_xml_stage = join(results_dir, "_best_robot.xml")  # staging copy of best robot
     _best_scalar = -np.inf
 
-    for gen in range(num_generations):
-        pop = ea.ask()
-        fitnesses = np.empty((len(pop), n_obj))
-        for idx, genotype in enumerate(pop):
-            fitnesses[idx] = world.evaluate_individual(
-                genotype, n_repeats=n_repeats, n_steps=n_steps
-            )
-            scalar = float(fitnesses[idx].sum())
-            if scalar > _best_scalar:
-                _best_scalar = scalar
-                shutil.copy2(
-                    join(world.temp_dir.name, "Robot.xml"),
-                    _best_xml_stage,
-                )
-        save_ckpt = (gen % ckpt_interval == 0)
-        ea.tell(pop, fitnesses, save_checkpoint=save_ckpt)
-        if save_ckpt:
-            gen_dir = join(results_dir, str(gen))
-            shutil.copy2(_best_xml_stage, join(gen_dir, "Robot.xml"))
-            if world.n_body_params == 0:
-                np.save(
-                    join(gen_dir, "fixed_body_genotype.npy"),
-                    world._fixed_body_genotype,
-                )
+    # --- Optional Pool for population-parallel evaluation ---
+    pool = None
+    if n_workers > 1:
+        import multiprocessing
+        ctx = multiprocessing.get_context("fork")  # safe on Linux; cheap to spawn
+        fixed_body_for_workers = (
+            world._fixed_body_genotype if world.n_body_params == 0 else None
+        )
+        pool = ctx.Pool(
+            processes=n_workers,
+            initializer=_worker_init,
+            initargs=(mode, fixed_body_for_workers),
+        )
+
+    try:
+        for gen in range(num_generations):
+            pop = ea.ask()
+            fitnesses = np.empty((len(pop), n_obj))
+
+            if pool is not None:
+                # Population-parallel: workers evaluate genotypes in parallel.
+                tasks = [
+                    (idx, genotype, n_repeats, n_steps)
+                    for idx, genotype in enumerate(pop)
+                ]
+                for idx, fitness, robot_xml in pool.imap_unordered(_worker_eval, tasks):
+                    fitnesses[idx] = fitness
+                    scalar = float(fitness.sum())
+                    if scalar > _best_scalar:
+                        _best_scalar = scalar
+                        with open(_best_xml_stage, "w") as fh:
+                            fh.write(robot_xml)
+            else:
+                # Serial path (legacy): one individual at a time in master process.
+                for idx, genotype in enumerate(pop):
+                    fitnesses[idx] = world.evaluate_individual(
+                        genotype, n_repeats=n_repeats, n_steps=n_steps
+                    )
+                    scalar = float(fitnesses[idx].sum())
+                    if scalar > _best_scalar:
+                        _best_scalar = scalar
+                        shutil.copy2(
+                            join(world.temp_dir.name, "Robot.xml"),
+                            _best_xml_stage,
+                        )
+
+            save_ckpt = (gen % ckpt_interval == 0)
+            ea.tell(pop, fitnesses, save_checkpoint=save_ckpt)
+            if save_ckpt:
+                gen_dir = join(results_dir, str(gen))
+                shutil.copy2(_best_xml_stage, join(gen_dir, "Robot.xml"))
+                if world.n_body_params == 0:
+                    np.save(
+                        join(gen_dir, "fixed_body_genotype.npy"),
+                        world._fixed_body_genotype,
+                    )
+    finally:
+        if pool is not None:
+            pool.close()
+            pool.join()
 
     # --- Training summary ---
     best_f = ea.f_best_so_far  # shape (3,) for NSGA-II
@@ -607,6 +727,7 @@ def run_multi_task_evolution(
         f.write(f"Generations     : {num_generations}\n")
         f.write(f"Population size : {population_size}\n")
         f.write(f"n_repeats       : {n_repeats}\n")
+        f.write(f"n_workers       : {n_workers}\n")
         f.write(f"Controller      : {type(world.controller).__name__}"
                 f"  ({world.n_weights} params)\n")
         f.write(f"Genotype size   : {world.n_params}"
@@ -638,6 +759,17 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help=(
+            "Number of parallel worker processes for population evaluation. "
+            "1 (default) keeps the legacy single-process path with AsyncVectorEnv. "
+            "On a SLURM cluster set this to $SLURM_CPUS_PER_TASK so the EA "
+            "evaluates the population in parallel."
+        ),
+    )
+    parser.add_argument(
         "--smoke",
         action="store_true",
         help="Short run for pipeline check (few gens, small pop)",
@@ -666,16 +798,19 @@ if __name__ == "__main__":
             ckpt_interval=1,
             results_dir=smoke_results_dir,
             random_seed=seed_value,
+            n_workers=args.workers,
         )
     else:
+        # pop=128, n_parents=64 → two clean waves of 64 on the cluster.
         run_multi_task_evolution(
             evolution_mode=args.mode,
             num_generations=100,
-            population_size=100,
-            n_parents=50,
+            population_size=128,
+            n_parents=64,
             n_repeats=3,
-            n_steps=500,
+            n_steps=1000,
             ckpt_interval=10,
             results_dir=normal_results_dir,
             random_seed=seed_value,
+            n_workers=args.workers,
         )

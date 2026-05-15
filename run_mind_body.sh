@@ -12,6 +12,15 @@
 
 export MUJOCO_GL=egl
 
+# Cap intra-process threading so each Pool worker uses exactly one thread.
+# Without this, every worker would try to use all $SLURM_CPUS_PER_TASK cores
+# for numpy/BLAS/MuJoCo, oversubscribing the node by ~64x.
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+export VECLIB_MAXIMUM_THREADS=1
+
 module purge
 module load gcc python py-virtualenv
 
@@ -20,4 +29,7 @@ source .venv/bin/activate
 pip install -e . --quiet
 
 mkdir -p logs
-python final_project_train.py --mode mind_body --seed ${SEED:-42}
+python final_project_train.py \
+    --mode mind_body \
+    --seed ${SEED:-42} \
+    --workers ${SLURM_CPUS_PER_TASK:-1}
