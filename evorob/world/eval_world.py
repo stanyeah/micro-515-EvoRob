@@ -6,9 +6,12 @@ from tempfile import TemporaryDirectory
 
 import numpy as np
 
-os.environ.setdefault("MUJOCO_GL", "egl")
+#os.environ.setdefault("MUJOCO_GL", "egl")
 
 from evorob.utils.filesys import get_last_checkpoint_dir, get_project_root
+from evorob.utils.mujoco_gl import configure_mujoco_gl
+
+configure_mujoco_gl()
 from evorob.world.base import World
 from evorob.world.robot.controllers.base import Controller
 from evorob.world.robot.morphology.ant_custom_robot import AntRobot
@@ -20,6 +23,13 @@ _EVAL_TERRAIN_XML = join(
 _EVAL_TERRAIN_IMAGE = join(
     ROOT_DIR, "evorob", "world", "robot", "assets", "hilly_hfield.png"
 )
+
+# Must match final_project_train.FIXED_BODY_GENOTYPE (mind_only fixed morphology)
+_FIXED_BODY_GENOTYPE = np.array(
+    [-0.6, 0.2, -0.6, 0.2, -0.6, 0.2, -0.6, 0.2], dtype=np.float64
+)
+_HEBBIAN_CTRL_GENES = 1120   # 27→8→8 Hebbian A,B,C,D coefficients
+_MIND_BODY_GENES = _HEBBIAN_CTRL_GENES + 8
 
 
 class EvalWorld(World):
@@ -43,11 +53,11 @@ class EvalWorld(World):
     def __init__(self):
         self.controller = self._default_controller()
         self.n_weights = self.controller.n_params
-        self.n_body_params = 8          # 4 legs × (upper, lower)
+        self.n_body_params = 8          # default mind_body layout until checkpoint infers otherwise
         self.n_params = self.n_weights + self.n_body_params
+        self._fixed_body_genotype = _FIXED_BODY_GENOTYPE.copy()
 
         self.temp_dir = TemporaryDirectory()
-        # self.world_file is the tmp copy of eval_terrain.xml with the robot injected
         self.world_file = join(self.temp_dir.name, "eval_terrain.xml")
 
         self.joint_limits = [
@@ -73,8 +83,8 @@ class EvalWorld(World):
 
     @staticmethod
     def _default_controller():
-        from evorob.world.robot.controllers.mlp_sol import NeuralNetworkController
-        return NeuralNetworkController(input_size=27, output_size=8, hidden_size=8)
+        from evorob.world.robot.controllers.mlp_hebbian import HebbianController
+        return HebbianController(input_size=27, output_size=8, hidden_size=8)
 
     def set_controller(self, controller: Controller) -> None:
         """Override the default MLP controller.
@@ -87,6 +97,37 @@ class EvalWorld(World):
         self.n_params = self.n_weights + self.n_body_params
         print(f"Controller set: {type(controller).__name__}  ({controller.n_params} params)")
 
+    def _sync_layout_from_genotype_size(self, genotype_size: int) -> None:
+        """Align n_weights / n_body_params / n_params with checkpoint genotype length."""
+        if genotype_size == _HEBBIAN_CTRL_GENES:
+            self.n_body_params = 0
+            self.n_weights = self.controller.n_params
+            self.n_params = self.n_weights
+            if self.n_weights != _HEBBIAN_CTRL_GENES:
+                raise ValueError(
+                    f"mind-only checkpoint ({genotype_size} genes) requires a controller "
+                    f"with {_HEBBIAN_CTRL_GENES} parameters (Hebbian 27→8→8); "
+                    f"got {self.n_weights} from {type(self.controller).__name__}."
+                )
+        elif genotype_size == _MIND_BODY_GENES:
+            self.n_body_params = 8
+            self.n_weights = self.controller.n_params
+            self.n_params = self.n_weights + self.n_body_params
+            if self.n_weights != _HEBBIAN_CTRL_GENES:
+                raise ValueError(
+                    f"mind+body checkpoint ({genotype_size} genes) expects "
+                    f"{_HEBBIAN_CTRL_GENES} controller genes; "
+                    f"got {self.n_weights} from {type(self.controller).__name__}."
+                )
+        elif genotype_size == self.n_weights + self.n_body_params:
+            pass
+        else:
+            raise ValueError(
+                f"Unexpected genotype length {genotype_size}. "
+                f"Expected {_HEBBIAN_CTRL_GENES} (mind_only) or "
+                f"{_MIND_BODY_GENES} (mind_body)."
+            )
+
     # ------------------------------------------------------------------
     # Robot XML injection — same pattern as FinalWorld
     # ------------------------------------------------------------------
@@ -98,8 +139,8 @@ class EvalWorld(World):
         include relative to self.world_file.
 
         Args:
-            final_body_path: Absolute path to the student's robot body XML
-                             (e.g. the AntRobot.xml written by FinalWorld). Must be an absolute path since the world XML will include it with a relative path.
+            final_body_path: Path to the student's robot body XML (e.g. Robot.xml
+                             saved during training). Use an absolute path when possible.
         """
         robot_filename = basename(final_body_path)
         robot_dest_path = join(self.temp_dir.name, robot_filename)
@@ -127,7 +168,13 @@ class EvalWorld(World):
         The body morphology is NOT regenerated here — call update_robot_xml first
         to provide the robot XML, then call geno2pheno to load the controller.
         """
-        self.controller.geno2pheno(genotype[:self.n_weights])
+        g = np.asarray(genotype, dtype=np.float64).reshape(-1)
+        self._sync_layout_from_genotype_size(g.size)
+
+        if self.n_body_params == 0:
+            self.controller.geno2pheno(g * 0.1)
+        else:
+            self.controller.geno2pheno(g[: self.n_weights] * 0.1)
 
     # ------------------------------------------------------------------
     # One-shot loader from a FinalWorld checkpoint
@@ -142,6 +189,9 @@ class EvalWorld(World):
 
         Args:
             checkpoint_dir: Path to your results directory (e.g. results/final_project).
+
+        Expects x_best.npy and Robot.xml under the latest generation folder (or root).
+        mind_only checkpoints may also include fixed_body_genotype.npy.
         """
         last_gen = get_last_checkpoint_dir(checkpoint_dir)
         search_dirs = ([last_gen] if last_gen else []) + [checkpoint_dir]
@@ -159,11 +209,20 @@ class EvalWorld(World):
         genotype = np.load(genotype_path, allow_pickle=True)
         print(f"Loaded genotype: shape={genotype.shape}")
 
+        fixed_body_path = _find("fixed_body_genotype.npy")
+        if fixed_body_path is not None:
+            self._fixed_body_genotype = np.asarray(
+                np.load(fixed_body_path), dtype=np.float64
+            ).reshape(-1)
+            print(f"Loaded fixed_body_genotype.npy  shape={self._fixed_body_genotype.shape}")
+
+        self._sync_layout_from_genotype_size(int(np.asarray(genotype).size))
+
         xml_path = _find("Robot.xml")
         if xml_path is None:
             raise FileNotFoundError(
                 f"Robot.xml not found in: {checkpoint_dir}\n"
-                "Re-run training with the updated pipeline to save the XML alongside checkpoints."
+                "Re-run training with the updated pipeline to save Robot.xml in checkpoints."
             )
         print(f"Loaded robot XML: {xml_path}")
         self.update_robot_xml(xml_path)

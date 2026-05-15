@@ -18,16 +18,16 @@ guarantee a high score on the leaderboard, and vice versa.
 
 Quick-start (recommended)
 --------------------------
-    python final_project_test.py --best_dir_path results/final_project
+    python final_project_test.py --best_dir_path results/final_mind_only
+    python final_project_test.py --best_dir_path results/final_mind_body
 
-The directory must contain x_best.npy (and ideally Robot.xml).
-If you used a non-default controller, also set MY_CONTROLLER below.
+The directory must contain x_best.npy and Robot.xml (from training checkpoints).
+mind_only (1120 genes): also include fixed_body_genotype.npy if not using Option A
+load_from_checkpoint (saved automatically during training).
 
 Option B — supply files manually
 ----------------------------------
-Set ROBOT_XML_PATH to your saved Robot.xml  AND
-    GENOTYPE_PATH  to the matching x_best.npy,
-then set MY_CONTROLLER if needed.
+Set ROBOT_XML_PATH and GENOTYPE_PATH, then use world.geno2pheno (handles ×0.1 scaling).
 
 Submission reminder
 --------------------
@@ -41,9 +41,14 @@ Always include in your zip:
 
 import argparse
 import os
+
+from evorob.utils.mujoco_gl import configure_mujoco_gl
+
+configure_mujoco_gl()
+
 import numpy as np
 
-os.environ.setdefault("MUJOCO_GL", "egl")
+#os.environ.setdefault("MUJOCO_GL", "egl")
 
 import evorob.world          # registers EvalEnv-v0
 import gymnasium as gym
@@ -55,20 +60,14 @@ from evorob.world.eval_world import EvalWorld
 # ===========================================================================
 
 # --- Controller ---
-# Set this to the controller you used during training.
-# Leave None to use the default (mlp_sol, input=27, output=8, hidden=8).
-#
-# from evorob.world.robot.controllers.mlp import NeuralNetworkController
-# MY_CONTROLLER = NeuralNetworkController(input_size=27, output_size=8, hidden_size=8)
-#
-# from evorob.world.robot.controllers.so2 import SO2Controller
-# MY_CONTROLLER = SO2Controller(input_size=27, output_size=8, hidden_size=8)
+# Must match final_project_train.py (Hebbian 27→8→8).  None uses EvalWorld default.
+from evorob.world.robot.controllers.mlp_hebbian import HebbianController
 
-MY_CONTROLLER = None
+MY_CONTROLLER = HebbianController(input_size=27, output_size=8, hidden_size=8)
 
 # --- Paths ---
-# Option A: directory that contains x_best.npy (recommended)
-CHECKPOINT_DIR = "results/final_project"
+# Option A: training results directory (x_best.npy, Robot.xml, …)
+CHECKPOINT_DIR = "results/final_mind_only"
 
 # Option B: provide the robot XML and genotype as separate files
 ROBOT_XML_PATH = None   # e.g. "/abs/path/to/Robot.xml"
@@ -175,8 +174,8 @@ if __name__ == "__main__":
         "--best_dir_path",
         default=None,
         metavar="DIR",
-        help="Directory containing x_best.npy (and optionally AntRobot.xml). "
-             "Overrides the CHECKPOINT_DIR constant above.",
+        help="Directory containing x_best.npy and Robot.xml. "
+             "Overrides CHECKPOINT_DIR (e.g. results/final_mind_only).",
     )
     args = parser.parse_args()
 
@@ -195,9 +194,10 @@ if __name__ == "__main__":
             raise FileNotFoundError(f"Genotype not found: {GENOTYPE_PATH}")
         world.update_robot_xml(ROBOT_XML_PATH)
         genotype = np.load(GENOTYPE_PATH, allow_pickle=True)
-        world.controller.geno2pheno(genotype[:world.n_weights])
+        world.geno2pheno(genotype)
         print(f"Robot  : {ROBOT_XML_PATH}")
-        print(f"Geno   : {GENOTYPE_PATH}  shape={genotype.shape}")
+        print(f"Geno   : {GENOTYPE_PATH}  shape={genotype.shape}"
+              f"  (layout: controller={world.n_weights}, body={world.n_body_params})")
     else:
         # Option A (default): load everything from the checkpoint directory
         world.load_from_checkpoint(checkpoint_dir)

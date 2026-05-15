@@ -1,9 +1,12 @@
 """
 MICRO-515 Final Project — Multi-task Robot Evolution
 =====================================================
-Evolve a legged robot (body + controller) to walk in the +x direction across
-three training environments simultaneously.  The genotype encodes both the
-neural controller weights and the body morphology (leg lengths).
+Evolve a legged robot to walk in the +x direction across three training
+environments simultaneously, using a Hebbian MLP controller and NSGA-II.
+
+Experiment modes (EVOLUTION_MODE / --mode):
+  mind_only  — evolve Hebbian A,B,C,D rules only; fixed ant-like body
+  mind_body  — co-evolve Hebbian rules and 8 leg-segment lengths
 
 Training environments (3 objectives)
 -------------------------------------
@@ -13,13 +16,20 @@ Training environments (3 objectives)
 
 The evaluation terrain is separate and fixed.  Students test their best
 evolved robot on it using final_project_test.py — it is not trained on.
+
+Mind-only runs save fixed_body_genotype.npy next to checkpoints for testing.
 """
 
+import argparse
 import os
 import shutil
 import xml.etree.ElementTree as xml
 from os.path import join
 from tempfile import TemporaryDirectory
+
+from evorob.utils.mujoco_gl import configure_mujoco_gl
+
+configure_mujoco_gl()
 
 import gymnasium as gym
 import numpy as np
@@ -28,15 +38,29 @@ from PIL import Image
 from gymnasium.vector import AsyncVectorEnv
 
 import evorob.world                         # registers EvalEnv-v0
-from evorob.algorithms.nsga_sol import NSGAII
+from evorob.algorithms.nsga import NSGAII
 from evorob.utils.filesys import get_last_checkpoint_dir, get_project_root
 from evorob.world.base import World
-from evorob.world.robot.controllers.mlp_sol import NeuralNetworkController
+from evorob.world.robot.controllers.mlp_hebbian import HebbianController
 from evorob.world.robot.morphology.ant_custom_robot import AntRobot
 
 ROOT_DIR = get_project_root()
 _ASSETS  = join(ROOT_DIR, "evorob", "world", "robot", "assets")
 MAX_EPISODE_STEPS = 1000  # fixed for leaderboard — do not change
+
+# --- Experiment configuration ------------------------------------------------
+# "mind_only" | "mind_body"  (overridable via --mode on the command line)
+EVOLUTION_MODE = "mind_only"
+
+# Ant-like fixed morphology for mind_only: ~0.2 m upper / ~0.4 m lower per leg
+FIXED_BODY_GENOTYPE = np.array(
+    [-0.6, 0.2, -0.6, 0.2, -0.6, 0.2, -0.6, 0.2], dtype=np.float64
+)
+
+RESULTS_DIRS = {
+    "mind_only": join(ROOT_DIR, "results", "final_mind_only"),
+    "mind_body": join(ROOT_DIR, "results", "final_mind_body"),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -46,25 +70,37 @@ MAX_EPISODE_STEPS = 1000  # fixed for leaderboard — do not change
 class FinalWorld(World):
     """Translates a genotype into a robot phenotype and evaluates it.
 
-    The genotype is a 1-D array: [controller_params | body_params].
+    Genotype layout
+    -----------------
+    * mind_only:  [ Hebbian rule params (1120) ] — body from FIXED_BODY_GENOTYPE
+    * mind_body:  [ Hebbian rule params (1120) | body params (8) ]
+
     Each call to evaluate_individual generates the robot body XML, injects it
     into every terrain template, then runs the controller in parallel episodes.
     """
 
-    def __init__(self):
-        # Choose your controller — swap for your own MLP, SO2Controller, Hebbian, or custom.
-        # Whatever you choose determines self.n_weights (controller parameter count).
-        #
-        # from evorob.world.robot.controllers.mlp import NeuralNetworkController  # your impl
-        # from evorob.world.robot.controllers.so2 import SO2Controller
-        # self.controller = SO2Controller(input_size=27, output_size=8, hidden_size=8)
-        self.controller = NeuralNetworkController(
+    def __init__(self, evolution_mode: str | None = None):
+        self.evolution_mode = evolution_mode or EVOLUTION_MODE
+        if self.evolution_mode not in RESULTS_DIRS:
+            raise ValueError(
+                f"evolution_mode must be one of {list(RESULTS_DIRS)}; "
+                f"got {self.evolution_mode!r}"
+            )
+
+        self.controller = HebbianController(
             input_size=27, output_size=8, hidden_size=8
         )
 
-        self.n_weights     = self.controller.n_params
-        self.n_body_params = 8          # 4 legs × (upper + lower segment length)
-        self.n_params      = self.n_weights + self.n_body_params
+        if self.evolution_mode == "mind_only":
+            self._fixed_body_genotype = FIXED_BODY_GENOTYPE.copy()
+            self.n_weights = self.controller.n_params
+            self.n_body_params = 0
+        else:
+            self._fixed_body_genotype = None
+            self.n_weights = self.controller.n_params
+            self.n_body_params = 8          # 4 legs × (upper + lower segment length)
+
+        self.n_params = self.n_weights + self.n_body_params
 
         # Temporary directory holds AntRobot.xml + one combined world XML per terrain
         self.temp_dir        = TemporaryDirectory()
@@ -106,14 +142,21 @@ class FinalWorld(World):
     def geno2pheno(self, genotype: np.ndarray):
         """Decode genotype into controller weights and body parameters.
 
-        Splits genotype into:
-          genotype[:n_weights]  → controller (scaled by 0.1 before loading)
-          genotype[n_weights:]  → 8 leg-segment lengths via (g+1)/4 + 0.1
+        mind_only:  genotype is all Hebbian genes; body from _fixed_body_genotype.
+        mind_body:  genotype[:n_weights] → rules, genotype[n_weights:] → body genes.
+
+        Controller genes are scaled by 0.1 before HebbianController.geno2pheno.
+        Body genes map to lengths via (g + 1) / 4 + 0.1.
 
         Returns (points, connectivity_mat) for AntRobot construction.
         """
-        control_params = genotype[:self.n_weights] * 0.1
-        body_params    = (genotype[self.n_weights:] + 1) / 4 + 0.1
+        if self.n_body_params == 0:
+            control_params = genotype * 0.1
+            body_genes = self._fixed_body_genotype
+        else:
+            control_params = genotype[: self.n_weights] * 0.1
+            body_genes = genotype[self.n_weights :]
+        body_params = (body_genes + 1) / 4 + 0.1
         self.controller.geno2pheno(control_params)
 
         front_left_leg, front_left_ankle, front_right_leg, front_right_ankle, back_left_leg, back_left_ankle, back_right_leg, back_right_ankle, = body_params
@@ -323,7 +366,19 @@ def evaluate_checkpoint(
         return None
     print(f"Loaded x_best  (shape: {x_best.shape})")
 
-    world = FinalWorld()
+    fixed_body = _load("fixed_body_genotype.npy")
+    x_size = int(np.asarray(x_best).size)
+    if x_size == 1120:
+        ckpt_mode = "mind_only"
+    elif x_size == 1128:
+        ckpt_mode = "mind_body"
+    else:
+        ckpt_mode = EVOLUTION_MODE
+        print(f"WARNING: unexpected x_best size {x_size}; using EVOLUTION_MODE={ckpt_mode}")
+
+    world = FinalWorld(evolution_mode=ckpt_mode)
+    if fixed_body is not None and ckpt_mode == "mind_only":
+        world._fixed_body_genotype = np.asarray(fixed_body, dtype=np.float64).reshape(-1)
     world.update_robot_xml(x_best)
     ctrl_name = type(world.controller).__name__
     print(f"Controller: {ctrl_name}  |  n_weights={world.n_weights}"
@@ -478,15 +533,19 @@ def run_multi_task_evolution(
     ckpt_interval:   int = 10,
     results_dir:     str = None,
     random_seed:     int = 42,
+    evolution_mode:  str | None = None,
 ) -> None:
     np.random.seed(random_seed)
 
-    world = FinalWorld()
+    mode = evolution_mode or EVOLUTION_MODE
+    world = FinalWorld(evolution_mode=mode)
+    print(f"Mode     : {world.evolution_mode}")
+    print(f"Seed     : {random_seed}")
     print(f"Genotype : {world.n_params} params"
           f"  (controller={world.n_weights}, body={world.n_body_params})")
 
     if results_dir is None:
-        results_dir = join(ROOT_DIR, "results", "final_project")
+        results_dir = RESULTS_DIRS[mode]
 
     ea = NSGAII(
         population_size=population_size,
@@ -505,6 +564,9 @@ def run_multi_task_evolution(
     print(f"Checkpoints: {results_dir}\n")
 
     os.makedirs(results_dir, exist_ok=True)
+    if world.n_body_params == 0:
+        np.save(join(results_dir, "fixed_body_genotype.npy"), world._fixed_body_genotype)
+
     _best_xml_stage = join(results_dir, "_best_robot.xml")  # staging copy of best robot
     _best_scalar = -np.inf
 
@@ -525,10 +587,13 @@ def run_multi_task_evolution(
         save_ckpt = (gen % ckpt_interval == 0)
         ea.tell(pop, fitnesses, save_checkpoint=save_ckpt)
         if save_ckpt:
-            shutil.copy2(
-                _best_xml_stage,
-                join(results_dir, str(gen), "Robot.xml"),
-            )
+            gen_dir = join(results_dir, str(gen))
+            shutil.copy2(_best_xml_stage, join(gen_dir, "Robot.xml"))
+            if world.n_body_params == 0:
+                np.save(
+                    join(gen_dir, "fixed_body_genotype.npy"),
+                    world._fixed_body_genotype,
+                )
 
     # --- Training summary ---
     best_f = ea.f_best_so_far  # shape (3,) for NSGA-II
@@ -537,8 +602,11 @@ def run_multi_task_evolution(
         f.write("=" * 60 + "\n")
         f.write("MICRO-515 Final Project — Training Summary\n")
         f.write("=" * 60 + "\n\n")
+        f.write(f"Evolution mode  : {world.evolution_mode}\n")
+        f.write(f"Random seed     : {random_seed}\n")
         f.write(f"Generations     : {num_generations}\n")
         f.write(f"Population size : {population_size}\n")
+        f.write(f"n_repeats       : {n_repeats}\n")
         f.write(f"Controller      : {type(world.controller).__name__}"
                 f"  ({world.n_weights} params)\n")
         f.write(f"Genotype size   : {world.n_params}"
@@ -552,13 +620,62 @@ def run_multi_task_evolution(
 
 
 if __name__ == "__main__":
-    # Quick smoke-test — 2 generations, tiny population
-    run_multi_task_evolution(
-        num_generations=100,
-        population_size=32,
-        n_parents=32,
-        n_repeats=2,
-        n_steps=100,
-        ckpt_interval=1,
-        results_dir=join(ROOT_DIR, "results", "final_test"),
+    parser = argparse.ArgumentParser(description="Multi-task Hebbian evolution (NSGA-II)")
+    parser.add_argument(
+        "--mode",
+        choices=("mind_only", "mind_body"),
+        default=EVOLUTION_MODE,
+        help="mind_only: evolve Hebbian rules only; mind_body: co-evolve rules + legs",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help=(
+            "Random seed for the EA. When set, checkpoints go to "
+            "results/final_<mode>/seed_<n>/ so multiple seeds don't overwrite "
+            "each other. Defaults to 42 with no subfolder (legacy behaviour)."
+        ),
+    )
+    parser.add_argument(
+        "--smoke",
+        action="store_true",
+        help="Short run for pipeline check (few gens, small pop)",
+    )
+    args = parser.parse_args()
+
+    # Per-seed results dir so seed sweeps don't overwrite each other.
+    if args.seed is not None:
+        normal_results_dir = join(RESULTS_DIRS[args.mode], f"seed_{args.seed}")
+        smoke_results_dir = join(ROOT_DIR, "results", f"smoke_{args.mode}",
+                                 f"seed_{args.seed}")
+        seed_value = args.seed
+    else:
+        normal_results_dir = None  # falls back to RESULTS_DIRS[mode]
+        smoke_results_dir = join(ROOT_DIR, "results", f"smoke_{args.mode}")
+        seed_value = 42
+
+    if args.smoke:
+        run_multi_task_evolution(
+            evolution_mode=args.mode,
+            num_generations=2,
+            population_size=4,
+            n_parents=4,
+            n_repeats=1,
+            n_steps=50,
+            ckpt_interval=1,
+            results_dir=smoke_results_dir,
+            random_seed=seed_value,
+        )
+    else:
+        run_multi_task_evolution(
+            evolution_mode=args.mode,
+            num_generations=100,
+            population_size=100,
+            n_parents=50,
+            n_repeats=3,
+            n_steps=500,
+            ckpt_interval=10,
+            results_dir=normal_results_dir,
+            random_seed=seed_value,
+        )

@@ -1,0 +1,23 @@
+============================================================
+MICRO-515 Final Project — Evaluation Results
+============================================================
+
+Controller : HebbianController  (1120 params)
+Genotype   : 1120 params  (controller=1120, body=0)
+Reward     : healthy_reward + x_position - ctrl_cost - cfrc_cost
+
+Mean  : -5659.04
+Std   : 6071.53
+Best  : 1215.45
+Worst : -19018.60
+
+Episode   1:   -4274.04
+Episode   2:   -2737.44
+Episode   3:    1215.45
+Episode   4:  -19018.60
+Episode   5:   -7971.37
+Episode   6:   -4373.56
+Episode   7:   -4374.88
+Episode   8:  -14002.76
+Episode   9:     337.81
+Episode  10:   -1391.05
