@@ -1,15 +1,16 @@
 #!/bin/bash
 #SBATCH --job-name=evorob_mind_only
 #SBATCH --account=micro-515
-#SBATCH --partition=standard
-#SBATCH --time=24:00:00
+#SBATCH --partition=academic
+#SBATCH --time=48:00:00
+#SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
+#SBATCH --cpus-per-task=64
 #SBATCH --mem=32G
 #SBATCH --output=logs/mind_only_%j.out
 #SBATCH --error=logs/mind_only_%j.err
 
-set -e
+export MUJOCO_GL=egl
 
 module purge
 module load gcc python py-virtualenv
