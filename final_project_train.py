@@ -27,7 +27,7 @@ import xml.etree.ElementTree as xml
 from os.path import join
 from tempfile import TemporaryDirectory
 
-from evorob.utils.w_gl import configure_mujoco_gl
+from evorob.utils.mujoco_gl import configure_mujoco_gl
 
 configure_mujoco_gl()
 

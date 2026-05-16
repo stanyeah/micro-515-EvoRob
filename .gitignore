@@ -174,3 +174,5 @@ cython_debug/
 
 # Local-only analysis scripts (downloaded data lives on laptop, not cluster).
 analyze_runs.py
+eval_v1_paired.py
+evaluation_output_compare/
