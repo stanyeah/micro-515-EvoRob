@@ -14,7 +14,8 @@ class EvalIceEnv(MujocoEnv, utils.EzPickle):
     Termination: robot torso must stay between 0.2 m and 1.0 m above the
     ground (height-based, same as flat — ice is still a flat surface).
 
-    Training reward:  healthy_reward + x_velocity - ctrl_cost - cfrc_cost
+    Training reward:  healthy_reward + x_position - ctrl_cost - cfrc_cost
+    (aligned with the leaderboard formula; see doc/final.md tip)
 
     Tune ctrl_cost_weight and cfrc_cost_weight to shape behaviour on the
     slippery surface (e.g. lower ctrl_cost to allow more actuation effort,
@@ -72,12 +73,13 @@ class EvalIceEnv(MujocoEnv, utils.EzPickle):
         x_after = self.data.qpos[0]
 
         x_velocity = (x_after - x_before) / self.dt
+        x_position = float(x_after)
         healthy_reward = 1.0
         ctrl_cost = float(np.sum(action ** 2) * self._ctrl_cost_weight)
         cfrc_cost = float(np.sum(self.data.cfrc_ext[1:] ** 2) * self._cfrc_cost_weight)
 
         terminated = self._is_terminated()
-        reward = healthy_reward + x_velocity - ctrl_cost - cfrc_cost
+        reward = healthy_reward + x_position - ctrl_cost - cfrc_cost
 
         info = {
             "healthy_reward": -10.0 if terminated else healthy_reward,
