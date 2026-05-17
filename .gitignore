@@ -176,3 +176,8 @@ cython_debug/
 analyze_runs.py
 eval_v1_paired.py
 evaluation_output_compare/
+
+# final_project_test.py default dir + local saved/normalized eval artifacts
+evaluation_output/
+evaluation_output_seed_*_saved/
+evaluation_output_seed_*_normalized/

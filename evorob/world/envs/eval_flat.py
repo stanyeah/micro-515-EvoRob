@@ -37,7 +37,7 @@ class EvalFlatEnv(MujocoEnv, utils.EzPickle):
         robot_path: str,
         frame_skip: int = 5,
         default_camera_config: dict = DEFAULT_CAMERA_CONFIG,
-        ctrl_cost_weight: float = 0.5,
+        ctrl_cost_weight: float = 1.0,
         cfrc_cost_weight: float = 5e-4,
         reset_noise_scale: float = 0.1,
         **kwargs,
