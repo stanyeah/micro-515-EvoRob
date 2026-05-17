@@ -22,7 +22,7 @@ Quick-start (recommended)
     python final_project_test.py --best_dir_path results/final_mind_body
 
 The directory must contain x_best.npy and Robot.xml (from training checkpoints).
-mind_only (1120 genes): also include fixed_body_genotype.npy if not using Option A
+mind_only (2240 genes @ hidden_size=16): also include fixed_body_genotype.npy if not using Option A
 load_from_checkpoint (saved automatically during training).
 
 Option B — supply files manually
@@ -63,7 +63,7 @@ from evorob.world.eval_world import EvalWorld
 # Must match final_project_train.py (Hebbian 27→8→8).  None uses EvalWorld default.
 from evorob.world.robot.controllers.mlp_hebbian import HebbianController
 
-MY_CONTROLLER = HebbianController(input_size=27, output_size=8, hidden_size=8)
+MY_CONTROLLER = HebbianController(input_size=27, output_size=8, hidden_size=16)
 
 # --- Paths ---
 # Option A: training results directory (x_best.npy, Robot.xml, …)
@@ -75,7 +75,7 @@ GENOTYPE_PATH  = None   # e.g. "/abs/path/to/x_best.npy"
 
 # --- Output ---
 OUTPUT_DIR = "evaluation_output"
-N_EPISODES = 10     # increase to 256 for the final leaderboard submission
+N_EPISODES = 64     # paired picker metric for the 24h sprint; bump to 256 for final submission
 SEED       = 0      # fixed — do NOT change for a fair comparison
 MAX_STEPS  = 1000   # fixed — do NOT change
 
@@ -92,15 +92,30 @@ def _neutral_reward(info: dict) -> float:
     )
 
 
-def run_episodes(world: EvalWorld, n_episodes: int, seed: int) -> list:
+def _accumulate_y(info: dict, y_min: float, y_max: float, y_abs_max: float):
+    y = float(info.get("y_position", float("nan")))
+    if not np.isfinite(y):
+        return y_min, y_max, y_abs_max
+    return min(y_min, y), max(y_max, y), max(y_abs_max, abs(y))
+
+
+def run_episodes(world: EvalWorld, n_episodes: int, seed: int):
+    """Returns (rewards, y_stats) where y_stats has per-episode lateral diagnostics."""
     rng = np.random.default_rng(seed)
     env = gym.make("EvalEnv-v0", robot_path=world.world_file,
                    max_episode_steps=MAX_STEPS)
     rewards = []
+    y_stats = []
 
     for ep in range(n_episodes):
         world.controller.reset_controller(batch_size=1)
-        obs, _ = env.reset(seed=int(rng.integers(0, 2 ** 31)))
+        obs, info0 = env.reset(seed=int(rng.integers(0, 2 ** 31)))
+        y0 = float(info0.get("y_position", float("nan")))
+        y_min = y0 if np.isfinite(y0) else float("inf")
+        y_max = y0 if np.isfinite(y0) else float("-inf")
+        y_abs_max = abs(y0) if np.isfinite(y0) else 0.0
+        y_last = y0 if np.isfinite(y0) else 0.0
+
         total, done = 0.0, False
         while not done:
             ctrl_obs = world.sensor_fn(obs) if world.sensor_fn is not None else obs
@@ -109,12 +124,25 @@ def run_episodes(world: EvalWorld, n_episodes: int, seed: int) -> list:
                 action = action.squeeze(0)
             obs, _, terminated, truncated, info = env.step(action)
             total += _neutral_reward(info)
+            y_min, y_max, y_abs_max = _accumulate_y(info, y_min, y_max, y_abs_max)
+            y_last = float(info.get("y_position", y_last))
             done = terminated or truncated
         rewards.append(total)
-        print(f"  episode {ep + 1:3d}/{n_episodes}: {total:.2f}")
+        if not np.isfinite(y_min):
+            y_min = y_last
+        if not np.isfinite(y_max):
+            y_max = y_last
+        y_stats.append({
+            "y_final": y_last,
+            "y_abs_max": y_abs_max,
+            "y_min": y_min,
+            "y_max": y_max,
+        })
+        print(f"  episode {ep + 1:3d}/{n_episodes}: reward={total:10.2f}  "
+              f"|y|_max={y_abs_max:6.3f}  y_final={y_last:7.3f}")
 
     env.close()
-    return rewards
+    return rewards, y_stats
 
 
 def record_video(world: EvalWorld, out_path: str, seed: int) -> None:
@@ -141,7 +169,8 @@ def record_video(world: EvalWorld, out_path: str, seed: int) -> None:
         print(f"Video skipped: {exc}")
 
 
-def save_score(world: EvalWorld, rewards: list, output_dir: str) -> None:
+def save_score(world: EvalWorld, rewards: list, output_dir: str,
+               y_stats: list | None = None) -> None:
     arr = np.asarray(rewards, dtype=float)
     score_path = os.path.join(output_dir, "evaluation_score.txt")
     with open(score_path, "w") as f:
@@ -159,6 +188,24 @@ def save_score(world: EvalWorld, rewards: list, output_dir: str) -> None:
         f.write(f"Worst : {arr.min():.2f}\n\n")
         for i, r in enumerate(rewards):
             f.write(f"Episode {i + 1:3d}: {r:10.2f}\n")
+
+        if y_stats is not None and len(y_stats) == len(rewards):
+            abs_max = np.array([s["y_abs_max"] for s in y_stats], dtype=float)
+            y_fin = np.array([s["y_final"] for s in y_stats], dtype=float)
+            f.write("\n" + "=" * 60 + "\n")
+            f.write("Lateral (y) diagnostics — torso/world y (m); not in reward\n")
+            f.write("=" * 60 + "\n\n")
+            f.write("Per episode: |y|_max = max |y| along trajectory; "
+                    "y_final = y at last step.\n")
+            f.write(f"{'Ep':>4}  {'|y|_max':>10}  {'y_final':>10}  {'y_min':>10}  {'y_max':>10}\n")
+            for i, s in enumerate(y_stats):
+                f.write(f"{i + 1:4d}  {s['y_abs_max']:10.4f}  {s['y_final']:10.4f}  "
+                        f"{s['y_min']:10.4f}  {s['y_max']:10.4f}\n")
+            f.write("\nSummary:\n")
+            f.write(f"  mean |y|_max   : {float(abs_max.mean()):.4f} m\n")
+            f.write(f"  max  |y|_max   : {float(abs_max.max()):.4f} m\n")
+            f.write(f"  mean |y_final| : {float(np.abs(y_fin).mean()):.4f} m\n")
+
     print(f"Score saved: {score_path}")
 
 
@@ -203,12 +250,16 @@ if __name__ == "__main__":
         world.load_from_checkpoint(checkpoint_dir)
 
     print(f"\nRunning {N_EPISODES} episodes on the evaluation terrain  (seed={SEED}) …")
-    rewards = run_episodes(world, N_EPISODES, SEED)
+    rewards, y_stats = run_episodes(world, N_EPISODES, SEED)
 
     arr = np.asarray(rewards, dtype=float)
+    abs_max = np.array([s["y_abs_max"] for s in y_stats], dtype=float)
     print(f"\nResults: mean={arr.mean():.2f} ± {arr.std():.2f}  "
           f"best={arr.max():.2f}  worst={arr.min():.2f}")
+    print(f"Lateral: mean |y|_max={abs_max.mean():.3f} m  "
+          f"worst |y|_max={abs_max.max():.3f} m  "
+          f"(dummy bridge is ~3 m wide in y; half-width ≈1.5 m from x-axis)")
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    save_score(world, rewards, OUTPUT_DIR)
+    save_score(world, rewards, OUTPUT_DIR, y_stats=y_stats)
     record_video(world, os.path.join(OUTPUT_DIR, "evaluation_video.mp4"), SEED)

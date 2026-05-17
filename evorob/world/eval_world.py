@@ -24,11 +24,23 @@ _EVAL_TERRAIN_IMAGE = join(
     ROOT_DIR, "evorob", "world", "robot", "assets", "hilly_hfield.png"
 )
 
+
+def _zscore_obs_sensor(mean: np.ndarray, std: np.ndarray):
+    """Match final_project_train._zscore_sensor_fn (keep package import cycles clean)."""
+    mean = np.asarray(mean, dtype=np.float64)
+    std = np.maximum(np.asarray(std, dtype=np.float64), 1e-6)
+
+    def fn(obs: np.ndarray) -> np.ndarray:
+        return (np.asarray(obs, dtype=np.float64) - mean) / std
+
+    return fn
+
+
 # Must match final_project_train.FIXED_BODY_GENOTYPE (mind_only fixed morphology)
 _FIXED_BODY_GENOTYPE = np.array(
     [-0.6, 0.2, -0.6, 0.2, -0.6, 0.2, -0.6, 0.2], dtype=np.float64
 )
-_HEBBIAN_CTRL_GENES = 1120   # 27→8→8 Hebbian A,B,C,D coefficients
+_HEBBIAN_CTRL_GENES = 2240   # 27→16→8 Hebbian A,B,C,D coefficients
 _MIND_BODY_GENES = _HEBBIAN_CTRL_GENES + 8
 
 
@@ -84,7 +96,7 @@ class EvalWorld(World):
     @staticmethod
     def _default_controller():
         from evorob.world.robot.controllers.mlp_hebbian import HebbianController
-        return HebbianController(input_size=27, output_size=8, hidden_size=8)
+        return HebbianController(input_size=27, output_size=8, hidden_size=16)
 
     def set_controller(self, controller: Controller) -> None:
         """Override the default MLP controller.
@@ -106,7 +118,7 @@ class EvalWorld(World):
             if self.n_weights != _HEBBIAN_CTRL_GENES:
                 raise ValueError(
                     f"mind-only checkpoint ({genotype_size} genes) requires a controller "
-                    f"with {_HEBBIAN_CTRL_GENES} parameters (Hebbian 27→8→8); "
+                    f"with {_HEBBIAN_CTRL_GENES} parameters (Hebbian 27→16→8); "
                     f"got {self.n_weights} from {type(self.controller).__name__}."
                 )
         elif genotype_size == _MIND_BODY_GENES:
@@ -217,6 +229,14 @@ class EvalWorld(World):
             print(f"Loaded fixed_body_genotype.npy  shape={self._fixed_body_genotype.shape}")
 
         self._sync_layout_from_genotype_size(int(np.asarray(genotype).size))
+
+        stats_path = _find("obs_norm_stats.npz")
+        if stats_path is not None:
+            z = np.load(stats_path)
+            self.sensor_fn = _zscore_obs_sensor(z["mean"], z["std"])
+            print(f"Loaded observation normalization: {stats_path}")
+        else:
+            self.sensor_fn = None
 
         xml_path = _find("Robot.xml")
         if xml_path is None:

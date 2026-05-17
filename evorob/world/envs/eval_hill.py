@@ -83,6 +83,7 @@ class EvalHillEnv(MujocoEnv, utils.EzPickle):
         info = {
             "healthy_reward": -10.0 if terminated else healthy_reward,
             "x_position": x_position,
+            "y_position": float(xyz_after[1]),
             "ctrl_cost": ctrl_cost,
             "cfrc_cost": cfrc_cost,
             "x_velocity": x_velocity,
@@ -122,4 +123,7 @@ class EvalHillEnv(MujocoEnv, utils.EzPickle):
         return self._get_obs()
 
     def _get_reset_info(self):
-        return {"x_position": float(self.data.qpos[0])}
+        return {
+            "x_position": float(self.data.qpos[0]),
+            "y_position": float(self.data.body(1).xpos[1]),
+        }

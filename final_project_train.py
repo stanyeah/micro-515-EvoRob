@@ -48,6 +48,12 @@ ROOT_DIR = get_project_root()
 _ASSETS  = join(ROOT_DIR, "evorob", "world", "robot", "assets")
 MAX_EPISODE_STEPS = 1000  # fixed for leaderboard — do not change
 
+# Z-score raw MuJoCo observations (dim 27) once per run using random actions on
+# flat + ice + hill, then apply via FinalWorld.sensor_fn. Training saves
+# results_dir/obs_norm_stats.npz; EvalWorld / evaluate_checkpoint load it when present.
+USE_OBS_NORMALIZATION = True
+OBS_CALIBRATION_TOTAL_SAMPLES = 2000
+
 # --- Experiment configuration ------------------------------------------------
 # "mind_only" | "mind_body"  (overridable via --mode on the command line)
 EVOLUTION_MODE = "mind_only"
@@ -72,8 +78,8 @@ class FinalWorld(World):
 
     Genotype layout
     -----------------
-    * mind_only:  [ Hebbian rule params (1120) ] — body from FIXED_BODY_GENOTYPE
-    * mind_body:  [ Hebbian rule params (1120) | body params (8) ]
+    * mind_only:  [ Hebbian rule params (2240 @ h=16) ] — body from FIXED_BODY_GENOTYPE
+    * mind_body:  [ Hebbian rule params (2240 @ h=16) | body params (8) ]
 
     Each call to evaluate_individual generates the robot body XML, injects it
     into every terrain template, then runs the controller in parallel episodes.
@@ -88,7 +94,7 @@ class FinalWorld(World):
             )
 
         self.controller = HebbianController(
-            input_size=27, output_size=8, hidden_size=8
+            input_size=27, output_size=8, hidden_size=16
         )
 
         if self.evolution_mode == "mind_only":
@@ -371,6 +377,61 @@ class FinalWorld(World):
         ])
 
 
+def _zscore_sensor_fn(mean: np.ndarray, std: np.ndarray):
+    """Return obs -> (obs - mean) / std, preserving batch shape for AsyncVectorEnv."""
+    mean = np.asarray(mean, dtype=np.float64)
+    std = np.maximum(np.asarray(std, dtype=np.float64), 1e-6)
+
+    def normalize(obs: np.ndarray) -> np.ndarray:
+        return (np.asarray(obs, dtype=np.float64) - mean) / std
+
+    return normalize
+
+
+def fit_obs_normalization(
+    world: FinalWorld,
+    reference_genotype: np.ndarray,
+    *,
+    n_samples_total: int,
+    max_episode_steps: int,
+    calibration_seed: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Sample raw observations with random controls on all three training terrains."""
+    world.sensor_fn = None
+    g = np.asarray(reference_genotype, dtype=np.float64).reshape(-1)
+    world.update_robot_xml(g)
+
+    terrains = (
+        ("FlatEnv-v0", world.flat_world_file),
+        ("IceEnv-v0", world.ice_world_file),
+        ("HillEnv-v0", world.hill_world_file),
+    )
+    n_envs = len(terrains)
+    n_per = max(1, n_samples_total // n_envs)
+    rows: list[np.ndarray] = []
+    rng = np.random.default_rng(calibration_seed)
+
+    for env_id, world_file in terrains:
+        n_collected = 0
+        while n_collected < n_per:
+            env = gym.make(
+                env_id, robot_path=world_file, max_episode_steps=max_episode_steps
+            )
+            world.controller.reset_controller(batch_size=1)
+            obs, _ = env.reset(seed=int(rng.integers(0, 2 ** 31)))
+            while n_collected < n_per:
+                rows.append(np.asarray(obs, dtype=np.float64).copy())
+                n_collected += 1
+                action = env.action_space.sample()
+                obs, _, term, trunc, _ = env.step(action)
+                if term or trunc:
+                    break
+            env.close()
+
+    X = np.stack(rows, axis=0)
+    return X.mean(axis=0), X.std(axis=0)
+
+
 # ---------------------------------------------------------------------------
 # Neutral leaderboard evaluation  (TA-graded — do not modify)
 # ---------------------------------------------------------------------------
@@ -395,12 +456,20 @@ def evaluate_checkpoint(
 
     # --- Locate checkpoint ---
     last_gen = get_last_checkpoint_dir(checkpoint_dir)
+    search_dirs = ([last_gen] if last_gen else []) + [checkpoint_dir]
 
     def _load(fname):
-        for d in ([last_gen] if last_gen else []) + [checkpoint_dir]:
+        for d in search_dirs:
             p = join(d, fname)
             if os.path.isfile(p):
                 return np.load(p, allow_pickle=True)
+        return None
+
+    def _find_file(fname: str):
+        for d in search_dirs:
+            p = join(d, fname)
+            if os.path.isfile(p):
+                return p
         return None
 
     x_best = _load("x_best.npy")
@@ -411,9 +480,9 @@ def evaluate_checkpoint(
 
     fixed_body = _load("fixed_body_genotype.npy")
     x_size = int(np.asarray(x_best).size)
-    if x_size == 1120:
+    if x_size == 2240:
         ckpt_mode = "mind_only"
-    elif x_size == 1128:
+    elif x_size == 2248:
         ckpt_mode = "mind_body"
     else:
         ckpt_mode = EVOLUTION_MODE
@@ -422,6 +491,15 @@ def evaluate_checkpoint(
     world = FinalWorld(evolution_mode=ckpt_mode)
     if fixed_body is not None and ckpt_mode == "mind_only":
         world._fixed_body_genotype = np.asarray(fixed_body, dtype=np.float64).reshape(-1)
+
+    stats_npz = _find_file("obs_norm_stats.npz")
+    if stats_npz is not None:
+        z = np.load(stats_npz)
+        world.sensor_fn = _zscore_sensor_fn(z["mean"], z["std"])
+        print(f"Loaded observation normalization: {stats_npz}\n")
+    else:
+        world.sensor_fn = None
+
     world.update_robot_xml(x_best)
     ctrl_name = type(world.controller).__name__
     print(f"Controller: {ctrl_name}  |  n_weights={world.n_weights}"
@@ -444,24 +522,51 @@ def evaluate_checkpoint(
         return dict(mean=float(arr.mean()), std=float(arr.std()),
                     best=float(arr.max()), worst=float(arr.min()), values=values)
 
-    def _run(env_id: str, world_file: str) -> list:
+    def _run(env_id: str, world_file: str) -> tuple[list, list]:
         rng = np.random.default_rng(SEED)
         env = gym.make(env_id, robot_path=world_file, max_episode_steps=MAX_STEPS)
         rewards = []
+        y_stats = []
         for ep in range(n_episodes):
             world.controller.reset_controller(batch_size=1)
-            obs, _ = env.reset(seed=int(rng.integers(0, 2 ** 31)))
+            obs, info0 = env.reset(seed=int(rng.integers(0, 2 ** 31)))
+            if world.sensor_fn is not None:
+                obs = world.sensor_fn(obs)
+            y0 = float(info0.get("y_position", float("nan")))
+            y_min = y0 if np.isfinite(y0) else float("inf")
+            y_max = y0 if np.isfinite(y0) else float("-inf")
+            y_abs_max = abs(y0) if np.isfinite(y0) else 0.0
+            y_last = y0 if np.isfinite(y0) else 0.0
+
             total, done = 0.0, False
             while not done:
                 action = world.controller.get_action(obs)
                 if action.ndim > 1:
                     action = action.squeeze(0)
                 obs, _, terminated, truncated, info = env.step(action)
+                if world.sensor_fn is not None:
+                    obs = world.sensor_fn(obs)
                 total += _neutral(info)
+                y = float(info.get("y_position", float("nan")))
+                if np.isfinite(y):
+                    y_min = min(y_min, y)
+                    y_max = max(y_max, y)
+                    y_abs_max = max(y_abs_max, abs(y))
+                    y_last = y
                 done = terminated or truncated
             rewards.append(total)
+            if not np.isfinite(y_min):
+                y_min = y_last
+            if not np.isfinite(y_max):
+                y_max = y_last
+            y_stats.append({
+                "y_final": y_last,
+                "y_abs_max": y_abs_max,
+                "y_min": y_min,
+                "y_max": y_max,
+            })
         env.close()
-        return rewards
+        return rewards, y_stats
 
     def _record(env_id: str, world_file: str, out_path: str) -> None:
         try:
@@ -470,6 +575,8 @@ def evaluate_checkpoint(
                            render_mode="rgb_array", max_episode_steps=MAX_STEPS)
             world.controller.reset_controller(batch_size=1)
             obs, _ = env.reset(seed=SEED)
+            if world.sensor_fn is not None:
+                obs = world.sensor_fn(obs)
             frames = []
             for _ in range(MAX_STEPS):
                 frames.append(env.render())
@@ -477,6 +584,8 @@ def evaluate_checkpoint(
                 if action.ndim > 1:
                     action = action.squeeze(0)
                 obs, _, terminated, truncated, _ = env.step(action)
+                if world.sensor_fn is not None:
+                    obs = world.sensor_fn(obs)
                 if terminated or truncated:
                     break
             env.close()
@@ -488,10 +597,13 @@ def evaluate_checkpoint(
     # --- Evaluate on each terrain ---
     os.makedirs(output_dir, exist_ok=True)
     results = {}
+    lateral_y = {}
 
     for terrain_name, (env_id, world_file) in terrains.items():
         print(f"  Running {terrain_name}  ({n_episodes} episodes)...", flush=True)
-        results[terrain_name] = _stats(_run(env_id, world_file))
+        rewards, y_rows = _run(env_id, world_file)
+        results[terrain_name] = _stats(rewards)
+        lateral_y[terrain_name] = y_rows
 
     # Per-episode 3-column table
     t_names = list(results.keys())
@@ -512,6 +624,12 @@ def evaluate_checkpoint(
     print(f"  {'std':>4}   " + "   ".join(
         f"{results[n]['std']:>{col_w}.2f}" for n in t_names
     ))
+    print()
+    print("  Lateral (y) torso — mean |y|_max over episodes (m); "
+          "not in neutral reward:")
+    for n in t_names:
+        am = np.asarray([r["y_abs_max"] for r in lateral_y[n]], dtype=float)
+        print(f"    {n:<5} mean={am.mean():.3f}  worst_episode={am.max():.3f}")
     print()
 
     # --- Record one video per terrain ---
@@ -551,6 +669,23 @@ def evaluate_checkpoint(
                 f.write(f"  Episode {i + 1:3d}: {v:10.2f}\n")
             f.write("\n")
 
+        f.write("=" * col + "\n")
+        f.write("LATERAL (Y) — diagnostics only (not in reward formula)\n")
+        f.write("=" * col + "\n\n")
+        f.write("Torso world y (m): |y|_max along episode; y_final at last step.\n\n")
+        for terrain_name in results:
+            f.write(f"{terrain_name.upper()}\n")
+            f.write(f"{'Ep':>4}  {'|y|_max':>10}  {'y_final':>10}  "
+                    f"{'y_min':>10}  {'y_max':>10}\n")
+            rows = lateral_y[terrain_name]
+            for i, s in enumerate(rows):
+                f.write(f"{i + 1:4d}  {s['y_abs_max']:10.4f}  {s['y_final']:10.4f}  "
+                        f"{s['y_min']:10.4f}  {s['y_max']:10.4f}\n")
+            am = np.asarray([s["y_abs_max"] for s in rows], dtype=float)
+            yf = np.asarray([s["y_final"] for s in rows], dtype=float)
+            f.write(f"  Summary: mean |y|_max={am.mean():.4f}  max={am.max():.4f}  "
+                    f"mean |y_final|={np.abs(yf).mean():.4f}\n\n")
+
     print(f"\nScore saved to: {score_path}")
     print("=" * col)
     for terrain_name, r in results.items():
@@ -576,8 +711,11 @@ def evaluate_checkpoint(
 _worker_world: "FinalWorld | None" = None
 
 
-def _worker_init(evolution_mode: str,
-                 fixed_body_genotype: np.ndarray | None) -> None:
+def _worker_init(
+    evolution_mode: str,
+    fixed_body_genotype: np.ndarray | None,
+    obs_norm: tuple[np.ndarray, np.ndarray] | None = None,
+) -> None:
     """Per-worker initializer: build one FinalWorld in serial-eval mode."""
     global _worker_world
     _worker_world = FinalWorld(evolution_mode=evolution_mode)
@@ -586,6 +724,9 @@ def _worker_init(evolution_mode: str,
         _worker_world._fixed_body_genotype = np.asarray(
             fixed_body_genotype, dtype=np.float64
         ).reshape(-1)
+    if obs_norm is not None:
+        m, s = obs_norm
+        _worker_world.sensor_fn = _zscore_sensor_fn(m, s)
 
 
 def _worker_eval(args):
@@ -651,6 +792,27 @@ def run_multi_task_evolution(
     if world.n_body_params == 0:
         np.save(join(results_dir, "fixed_body_genotype.npy"), world._fixed_body_genotype)
 
+    obs_norm_bundle: tuple[np.ndarray, np.ndarray] | None = None
+    if USE_OBS_NORMALIZATION:
+        ref_g = np.random.uniform(bounds[0], bounds[1], size=world.n_params)
+        print(
+            f"Calibrating observation normalization "
+            f"({OBS_CALIBRATION_TOTAL_SAMPLES} samples, random policy)...",
+            flush=True,
+        )
+        mean, std = fit_obs_normalization(
+            world,
+            ref_g,
+            n_samples_total=OBS_CALIBRATION_TOTAL_SAMPLES,
+            max_episode_steps=n_steps,
+            calibration_seed=random_seed,
+        )
+        np.savez(join(results_dir, "obs_norm_stats.npz"), mean=mean, std=std)
+        world.sensor_fn = _zscore_sensor_fn(mean, std)
+        obs_norm_bundle = (mean, std)
+        print(f"Observation normalization saved to {join(results_dir, 'obs_norm_stats.npz')}\n",
+              flush=True)
+
     _best_xml_stage = join(results_dir, "_best_robot.xml")  # staging copy of best robot
     _best_scalar = -np.inf
 
@@ -665,7 +827,7 @@ def run_multi_task_evolution(
         pool = ctx.Pool(
             processes=n_workers,
             initializer=_worker_init,
-            initargs=(mode, fixed_body_for_workers),
+            initargs=(mode, fixed_body_for_workers, obs_norm_bundle),
         )
 
     try:
@@ -705,6 +867,9 @@ def run_multi_task_evolution(
             if save_ckpt:
                 gen_dir = join(results_dir, str(gen))
                 shutil.copy2(_best_xml_stage, join(gen_dir, "Robot.xml"))
+                obs_stats = join(results_dir, "obs_norm_stats.npz")
+                if os.path.isfile(obs_stats):
+                    shutil.copy2(obs_stats, join(gen_dir, "obs_norm_stats.npz"))
                 if world.n_body_params == 0:
                     np.save(
                         join(gen_dir, "fixed_body_genotype.npy"),

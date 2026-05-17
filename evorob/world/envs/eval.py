@@ -17,7 +17,9 @@ class EvalEnv(MujocoEnv, utils.EzPickle):
     inferred at runtime from the MuJoCo model.
 
     The info dict always exposes the four keys used by the neutral leaderboard
-    reward formula (healthy_reward, x_position, ctrl_cost, cfrc_cost).
+    reward formula (healthy_reward, x_position, ctrl_cost, cfrc_cost), plus
+    y_position (root joint y) for lateral drift diagnostics — it does not enter
+    the neutral reward.
     """
 
     metadata = {"render_modes": ["human", "rgb_array", "depth_array"]}
@@ -89,6 +91,7 @@ class EvalEnv(MujocoEnv, utils.EzPickle):
         info = {
             "healthy_reward": -10.0 if terminated else healthy_reward,
             "x_position": float(x_after),
+            "y_position": float(self.data.qpos[1]),
             "ctrl_cost": ctrl_cost,
             "cfrc_cost": cfrc_cost,
             "x_velocity": x_velocity,
@@ -114,4 +117,7 @@ class EvalEnv(MujocoEnv, utils.EzPickle):
         return self._get_obs()
 
     def _get_reset_info(self):
-        return {"x_position": float(self.data.qpos[0])}
+        return {
+            "x_position": float(self.data.qpos[0]),
+            "y_position": float(self.data.qpos[1]),
+        }

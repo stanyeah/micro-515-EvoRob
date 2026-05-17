@@ -6,18 +6,18 @@ Controller : HebbianController  (1120 params)
 Genotype   : 1120 params  (controller=1120, body=0)
 Reward     : healthy_reward + x_position - ctrl_cost - cfrc_cost
 
-Mean  : -5659.04
-Std   : 6071.53
-Best  : 1215.45
-Worst : -19018.60
+Mean  : -7638.27
+Std   : 14878.91
+Best  : 10231.41
+Worst : -43448.79
 
-Episode   1:   -4274.04
-Episode   2:   -2737.44
-Episode   3:    1215.45
-Episode   4:  -19018.60
-Episode   5:   -7971.37
-Episode   6:   -4373.56
-Episode   7:   -4374.88
-Episode   8:  -14002.76
-Episode   9:     337.81
-Episode  10:   -1391.05
+Episode   1:  -14244.98
+Episode   2:  -43448.79
+Episode   3:   10231.41
+Episode   4:   -4246.11
+Episode   5:    -390.85
+Episode   6:    -265.18
+Episode   7:    -859.71
+Episode   8:    3233.34
+Episode   9:  -23782.33
+Episode  10:   -2609.55
