@@ -15,8 +15,8 @@ class EvalHillEnv(MujocoEnv, utils.EzPickle):
     gets stuck (velocity < 1 cm/s for > 10 s), or produces NaN/Inf accelerations.
     Height-based termination is not used since the robot legitimately climbs.
 
-    Training reward:  healthy_reward + x_position - ctrl_cost - cfrc_cost
-    + upright_weight * R[2,2]  (torso upright bonus; training-only shaping)
+    Training reward:  healthy_reward + forward_reward_weight * x_position
+                      - ctrl_cost - cfrc_cost  (hill uses torso x position per step)
 
     The info dict always exposes the four keys required by the neutral
     leaderboard formula: healthy_reward, x_position, ctrl_cost, cfrc_cost.
@@ -31,7 +31,8 @@ class EvalHillEnv(MujocoEnv, utils.EzPickle):
         default_camera_config: dict = DEFAULT_CAMERA_CONFIG,
         ctrl_cost_weight: float = 0.5,
         cfrc_cost_weight: float = 5e-4,
-        upright_weight: float = 3.0,
+        healthy_reward: float = 0.5,
+        forward_reward_weight: float = 1.5,
         reset_noise_scale: float = 0.1,
         **kwargs,
     ):
@@ -41,12 +42,14 @@ class EvalHillEnv(MujocoEnv, utils.EzPickle):
 
         utils.EzPickle.__init__(
             self, xml_file_path, frame_skip, default_camera_config,
-            ctrl_cost_weight, cfrc_cost_weight, upright_weight, reset_noise_scale, **kwargs,
+            ctrl_cost_weight, cfrc_cost_weight, healthy_reward,
+            forward_reward_weight, reset_noise_scale, **kwargs,
         )
 
         self._ctrl_cost_weight = ctrl_cost_weight
         self._cfrc_cost_weight = cfrc_cost_weight
-        self._upright_weight = upright_weight
+        self._healthy_reward = healthy_reward
+        self._forward_reward_weight = forward_reward_weight
         self._reset_noise_scale = reset_noise_scale
         self._stuck_count = 0
 
@@ -76,22 +79,21 @@ class EvalHillEnv(MujocoEnv, utils.EzPickle):
         x_velocity = float(xyz_velocity[0])
         x_position = float(xyz_after[0])
 
-        healthy_reward = 1.0
+        healthy_reward = self._healthy_reward
+        forward_reward = self._forward_reward_weight * x_position
         ctrl_cost = float(np.sum(action ** 2) * self._ctrl_cost_weight)
         cfrc_cost = float(np.sum(self.data.cfrc_ext[1:] ** 2) * self._cfrc_cost_weight)
-        upright_bonus = self._torso_rzz()
 
         terminated = self._is_terminated(xyz_velocity)
-        reward = (healthy_reward + x_position - ctrl_cost - cfrc_cost
-                  + self._upright_weight * upright_bonus)
+        reward = healthy_reward + forward_reward - ctrl_cost - cfrc_cost
 
         info = {
             "healthy_reward": -10.0 if terminated else healthy_reward,
+            "forward_reward": forward_reward,
             "x_position": x_position,
             "y_position": float(xyz_after[1]),
             "ctrl_cost": ctrl_cost,
             "cfrc_cost": cfrc_cost,
-            "upright_bonus": upright_bonus,
             "x_velocity": x_velocity,
         }
 

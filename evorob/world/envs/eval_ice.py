@@ -20,10 +20,10 @@ class EvalIceEnv(MujocoEnv, utils.EzPickle):
     missed. The stuck check uses x-y velocity only so a robot that is purely
     falling/bouncing in z is still allowed (z-bound termination handles that).
 
-    Training reward:  healthy_reward + x_velocity - ctrl_cost - cfrc_cost
-    + upright_weight * R[2,2]  (torso upright bonus; training-only shaping)
+    Training reward:  healthy_reward + forward_reward_weight * x_velocity
+                      - ctrl_cost - cfrc_cost
 
-    Termination uses R[2,2] < 0.2 (severe tilt / near flip). Tune upright_weight on the slippery surface.
+    Termination uses R[2,2] < 0.2 (severe tilt / near flip). No upright shaping term.
 
     The info dict always exposes the four keys required by the neutral
     leaderboard formula: healthy_reward, x_position, ctrl_cost, cfrc_cost.
@@ -38,7 +38,8 @@ class EvalIceEnv(MujocoEnv, utils.EzPickle):
         default_camera_config: dict = DEFAULT_CAMERA_CONFIG,
         ctrl_cost_weight: float = 0.5,
         cfrc_cost_weight: float = 5e-4,
-        upright_weight: float = 3.0,
+        healthy_reward: float = 0.5,
+        forward_reward_weight: float = 1.5,
         reset_noise_scale: float = 0.1,
         **kwargs,
     ):
@@ -48,12 +49,14 @@ class EvalIceEnv(MujocoEnv, utils.EzPickle):
 
         utils.EzPickle.__init__(
             self, xml_file_path, frame_skip, default_camera_config,
-            ctrl_cost_weight, cfrc_cost_weight, upright_weight, reset_noise_scale, **kwargs,
+            ctrl_cost_weight, cfrc_cost_weight, healthy_reward,
+            forward_reward_weight, reset_noise_scale, **kwargs,
         )
 
         self._ctrl_cost_weight = ctrl_cost_weight
         self._cfrc_cost_weight = cfrc_cost_weight
-        self._upright_weight = upright_weight
+        self._healthy_reward = healthy_reward
+        self._forward_reward_weight = forward_reward_weight
         self._reset_noise_scale = reset_noise_scale
         self._stuck_count = 0
 
@@ -82,22 +85,21 @@ class EvalIceEnv(MujocoEnv, utils.EzPickle):
         x_velocity = (x_after - x_before) / self.dt
         x_position = float(x_after)
         xyz_velocity = self.data.qvel[:3].copy()
-        healthy_reward = 1.0
+        healthy_reward = self._healthy_reward
+        forward_reward = self._forward_reward_weight * x_velocity
         ctrl_cost = float(np.sum(action ** 2) * self._ctrl_cost_weight)
         cfrc_cost = float(np.sum(self.data.cfrc_ext[1:] ** 2) * self._cfrc_cost_weight)
-        upright_bonus = self._torso_rzz()
 
         terminated = self._is_terminated(xyz_velocity)
-        reward = (healthy_reward + x_velocity - ctrl_cost - cfrc_cost
-                  + self._upright_weight * upright_bonus)
+        reward = healthy_reward + forward_reward - ctrl_cost - cfrc_cost
 
         info = {
             "healthy_reward": -10.0 if terminated else healthy_reward,
+            "forward_reward": forward_reward,
             "x_position": float(x_after),
             "y_position": float(self.data.body(1).xpos[1]),
             "ctrl_cost": ctrl_cost,
             "cfrc_cost": cfrc_cost,
-            "upright_bonus": upright_bonus,
             "x_velocity": x_velocity,
         }
 

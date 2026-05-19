@@ -521,12 +521,14 @@ def evaluate_checkpoint(
     _expected_floor_mu = {"flat": 1.0, "ice": 0.2}
 
     def _forward_term(info: dict, forward_mode: str) -> float:
+        if "forward_reward" in info:
+            return float(info["forward_reward"])
         if forward_mode == "velocity":
             return float(info.get("x_velocity", 0.0))
         return float(info.get("x_position", 0.0))
 
     def _neutral(info: dict, forward_mode: str) -> float:
-        return (float(info.get("healthy_reward", 1.0))
+        return (float(info.get("healthy_reward", 0.5))
                 + _forward_term(info, forward_mode)
                 - float(info.get("ctrl_cost",     0.0))
                 - float(info.get("cfrc_cost",     0.0)))
@@ -540,7 +542,7 @@ def evaluate_checkpoint(
         return _stats([r[key] for r in rows])
 
     def _run(terrain_name: str, env_cls, world_file: str,
-             forward_mode: str) -> tuple[list, list, list, float]:
+             forward_mode: str) -> tuple[list, list, list]:
         if terrain_name == "ice" and os.path.realpath(world_file) == os.path.realpath(
                 world.flat_world_file):
             raise RuntimeError(
@@ -559,7 +561,6 @@ def evaluate_checkpoint(
         print(f"  {terrain_name}: {env_cls.__name__}  floor_mu={floor_mu:.2f}  "
               f"xml={world_file}", flush=True)
 
-        upright_weight = float(getattr(base_env, "_upright_weight", 0.0))
         env = TimeLimit(base_env, MAX_STEPS)
         rng = np.random.default_rng(SEED)
         rewards = []
@@ -581,7 +582,6 @@ def evaluate_checkpoint(
             x_pos_sum = 0.0
             ctrl_sum = 0.0
             cfrc_sum = 0.0
-            upright_sum = 0.0
             env_reward_sum = 0.0
             n_steps = 0
             total, done = 0.0, False
@@ -597,7 +597,6 @@ def evaluate_checkpoint(
                 x_pos_sum += float(info.get("x_position", 0.0))
                 ctrl_sum += float(info.get("ctrl_cost", 0.0))
                 cfrc_sum += float(info.get("cfrc_cost", 0.0))
-                upright_sum += float(info.get("upright_bonus", 0.0))
                 env_reward_sum += float(reward)
                 total += _neutral(info, forward_mode)
                 n_steps += 1
@@ -608,9 +607,7 @@ def evaluate_checkpoint(
                     y_abs_max = max(y_abs_max, abs(y))
                     y_last = y
                 done = terminated or truncated
-            upright_term_sum = upright_weight * upright_sum
-            training_total = (healthy_sum + forward_sum - ctrl_sum - cfrc_sum
-                              + upright_term_sum)
+            training_total = healthy_sum + forward_sum - ctrl_sum - cfrc_sum
             rewards.append(total)
             if not np.isfinite(y_min):
                 y_min = y_last
@@ -628,15 +625,13 @@ def evaluate_checkpoint(
                 "x_position": x_pos_sum,
                 "ctrl_cost": ctrl_sum,
                 "cfrc_cost": cfrc_sum,
-                "upright_bonus": upright_sum,
-                "upright_term": upright_term_sum,
                 "neutral_total": total,
                 "training_total": training_total,
                 "env_reward_sum": env_reward_sum,
                 "n_steps": n_steps,
             })
         env.close()
-        return rewards, y_stats, component_rows, upright_weight
+        return rewards, y_stats, component_rows
 
     def _record(env_cls, world_file: str, out_path: str) -> None:
         try:
@@ -669,17 +664,14 @@ def evaluate_checkpoint(
     results = {}
     lateral_y = {}
     breakdown = {}
-    upright_weights = {}
-
     for terrain_name, (env_cls, world_file, forward_mode) in terrain_specs.items():
         print(f"  Running {terrain_name}  ({n_episodes} episodes)...", flush=True)
-        rewards, y_rows, comp_rows, uw = _run(
+        rewards, y_rows, comp_rows = _run(
             terrain_name, env_cls, world_file, forward_mode,
         )
         results[terrain_name] = _stats(rewards)
         lateral_y[terrain_name] = y_rows
         breakdown[terrain_name] = comp_rows
-        upright_weights[terrain_name] = uw
 
     # Per-episode 3-column table
     t_names = list(results.keys())
@@ -714,8 +706,6 @@ def evaluate_checkpoint(
         ("x_position", "+ abs x diag"),
         ("ctrl_cost", "−"),
         ("cfrc_cost", "−"),
-        ("upright_bonus", "+ raw"),
-        ("upright_term", "+"),
         ("neutral_total", "="),
         ("training_total", "="),
         ("env_reward_sum", "="),
@@ -794,21 +784,18 @@ def evaluate_checkpoint(
         f.write("Reward component breakdown (per-episode sums)\n")
         f.write("=" * col + "\n\n")
         f.write("Each value is the sum over steps in one episode.\n")
-        f.write("Training:  healthy + forward - ctrl_cost - cfrc_cost"
-                " + upright_weight * upright_bonus\n")
-        f.write("  forward = sum(x_velocity) on flat/ice, sum(x_position) on hill\n")
-        f.write("Neutral:   same as training without upright term\n\n")
+        f.write("Training:  healthy + forward - ctrl_cost - cfrc_cost\n")
+        f.write("  healthy=0.5/step, forward=1.5*x_velocity (flat/ice)"
+                " or 1.5*x_position (hill) per step\n\n")
 
         summary_keys = [
             "healthy_reward", "forward_reward", "x_position", "ctrl_cost", "cfrc_cost",
-            "upright_bonus", "upright_term", "neutral_total",
-            "training_total", "env_reward_sum", "n_steps",
+            "neutral_total", "training_total", "env_reward_sum", "n_steps",
         ]
         for terrain_name in t_names:
-            uw = upright_weights[terrain_name]
             rows = breakdown[terrain_name]
             f.write("=" * col + "\n")
-            f.write(f"{terrain_name.upper()}  (upright_weight={uw})\n")
+            f.write(f"{terrain_name.upper()}\n")
             f.write("=" * col + "\n\n")
             f.write(f"{'Component':<18} {'Mean':>10} {'Std':>10}"
                     f" {'Best':>10} {'Worst':>10}\n")
@@ -821,13 +808,11 @@ def evaluate_checkpoint(
             f.write("Per-episode detail\n")
             f.write("-" * col + "\n")
             f.write(f"{'Ep':>4}  {'healthy':>9} {'forward':>9} {'x_pos':>9} {'ctrl':>9}"
-                    f" {'cfrc':>9} {'upright':>9} {'up_term':>9} {'neutral':>9}"
-                    f" {'train':>9} {'steps':>6}\n")
+                    f" {'cfrc':>9} {'neutral':>9} {'train':>9} {'steps':>6}\n")
             for i, r in enumerate(rows):
                 f.write(
                     f"{i + 1:4d}  {r['healthy_reward']:9.2f} {r['forward_reward']:9.2f}"
                     f" {r['x_position']:9.2f} {r['ctrl_cost']:9.2f} {r['cfrc_cost']:9.2f}"
-                    f" {r['upright_bonus']:9.2f} {r['upright_term']:9.2f}"
                     f" {r['neutral_total']:9.2f} {r['training_total']:9.2f}"
                     f" {r['n_steps']:6d}\n"
                 )
