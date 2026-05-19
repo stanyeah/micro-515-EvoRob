@@ -784,7 +784,7 @@ def evaluate_checkpoint(
         f.write("Each value is the sum over steps in one episode.\n")
         f.write("Training:  healthy(1.0) + forward - ctrl_cost - cfrc_cost\n")
         f.write("  flat/ice: forward=x_velocity, ctrl_weight=0.5\n")
-        f.write("  hill: forward=x_position, ctrl_weight=1.0\n\n")
+        f.write("  hill: forward=x_position, ctrl_weight=0.5; flip term R[2,2]<0\n\n")
 
         summary_keys = [
             "healthy_reward", "forward_reward", "x_position", "ctrl_cost", "cfrc_cost",

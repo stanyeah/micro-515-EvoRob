@@ -11,10 +11,10 @@ DEFAULT_CAMERA_CONFIG = {"distance": 5.0}
 class EvalHillEnv(MujocoEnv, utils.EzPickle):
     """Hill terrain evaluation environment.
 
-    Termination: torso flip (R[2,2] < 0.5). No height-based termination on hills.
+    Termination: torso flip (R[2,2] < 0.0). No height-based termination on hills.
 
     Training reward:  healthy_reward + x_position - ctrl_cost - cfrc_cost
-    (ctrl_cost_weight=1.0 by default).
+    (ctrl_cost_weight=0.5 by default).
 
     The info dict always exposes the four keys required by the neutral
     leaderboard formula: healthy_reward, x_position, ctrl_cost, cfrc_cost.
@@ -27,7 +27,7 @@ class EvalHillEnv(MujocoEnv, utils.EzPickle):
         robot_path: str,
         frame_skip: int = 5,
         default_camera_config: dict = DEFAULT_CAMERA_CONFIG,
-        ctrl_cost_weight: float = 1.0,
+        ctrl_cost_weight: float = 0.5,
         cfrc_cost_weight: float = 5e-4,
         reset_noise_scale: float = 0.1,
         **kwargs,
@@ -91,7 +91,7 @@ class EvalHillEnv(MujocoEnv, utils.EzPickle):
         if not np.isfinite(self.state_vector()).all():
             return True
         R = self.data.body(1).xmat.reshape(3, 3)
-        return float(R[2, 2]) < 0.5
+        return float(R[2, 2]) < 0.0
 
     def _get_obs(self):
         return np.concatenate((self.data.qpos.flat[2:], self.data.qvel.flat.copy()))
