@@ -521,14 +521,12 @@ def evaluate_checkpoint(
     _expected_floor_mu = {"flat": 1.0, "ice": 0.2}
 
     def _forward_term(info: dict, forward_mode: str) -> float:
-        if "forward_reward" in info:
-            return float(info["forward_reward"])
         if forward_mode == "velocity":
             return float(info.get("x_velocity", 0.0))
         return float(info.get("x_position", 0.0))
 
     def _neutral(info: dict, forward_mode: str) -> float:
-        return (float(info.get("healthy_reward", 0.5))
+        return (float(info.get("healthy_reward", 1.0))
                 + _forward_term(info, forward_mode)
                 - float(info.get("ctrl_cost",     0.0))
                 - float(info.get("cfrc_cost",     0.0)))
@@ -784,9 +782,9 @@ def evaluate_checkpoint(
         f.write("Reward component breakdown (per-episode sums)\n")
         f.write("=" * col + "\n\n")
         f.write("Each value is the sum over steps in one episode.\n")
-        f.write("Training:  healthy + forward - ctrl_cost - cfrc_cost\n")
-        f.write("  healthy=0.5/step, forward=1.5*x_velocity (flat/ice)"
-                " or 1.5*x_position (hill) per step\n\n")
+        f.write("Training:  healthy(1.0) + forward - ctrl_cost - cfrc_cost\n")
+        f.write("  flat/ice: forward=x_velocity, ctrl_weight=0.5\n")
+        f.write("  hill: forward=x_position, ctrl_weight=1.0\n\n")
 
         summary_keys = [
             "healthy_reward", "forward_reward", "x_position", "ctrl_cost", "cfrc_cost",

@@ -11,12 +11,10 @@ DEFAULT_CAMERA_CONFIG = {"distance": 5.0}
 class EvalHillEnv(MujocoEnv, utils.EzPickle):
     """Hill terrain evaluation environment.
 
-    Termination: robot is terminated when the torso tilts too far (R[2,2] < 0.2),
-    gets stuck (velocity < 1 cm/s for > 10 s), or produces NaN/Inf accelerations.
-    Height-based termination is not used since the robot legitimately climbs.
+    Termination: torso flip (R[2,2] < 0.5). No height-based termination on hills.
 
-    Training reward:  healthy_reward + forward_reward_weight * x_position
-                      - ctrl_cost - cfrc_cost  (hill uses torso x position per step)
+    Training reward:  healthy_reward + x_position - ctrl_cost - cfrc_cost
+    (ctrl_cost_weight=1.0 by default).
 
     The info dict always exposes the four keys required by the neutral
     leaderboard formula: healthy_reward, x_position, ctrl_cost, cfrc_cost.
@@ -29,10 +27,8 @@ class EvalHillEnv(MujocoEnv, utils.EzPickle):
         robot_path: str,
         frame_skip: int = 5,
         default_camera_config: dict = DEFAULT_CAMERA_CONFIG,
-        ctrl_cost_weight: float = 0.5,
+        ctrl_cost_weight: float = 1.0,
         cfrc_cost_weight: float = 5e-4,
-        healthy_reward: float = 0.5,
-        forward_reward_weight: float = 1.5,
         reset_noise_scale: float = 0.1,
         **kwargs,
     ):
@@ -42,16 +38,12 @@ class EvalHillEnv(MujocoEnv, utils.EzPickle):
 
         utils.EzPickle.__init__(
             self, xml_file_path, frame_skip, default_camera_config,
-            ctrl_cost_weight, cfrc_cost_weight, healthy_reward,
-            forward_reward_weight, reset_noise_scale, **kwargs,
+            ctrl_cost_weight, cfrc_cost_weight, reset_noise_scale, **kwargs,
         )
 
         self._ctrl_cost_weight = ctrl_cost_weight
         self._cfrc_cost_weight = cfrc_cost_weight
-        self._healthy_reward = healthy_reward
-        self._forward_reward_weight = forward_reward_weight
         self._reset_noise_scale = reset_noise_scale
-        self._stuck_count = 0
 
         MujocoEnv.__init__(
             self, xml_file_path, frame_skip,
@@ -71,27 +63,21 @@ class EvalHillEnv(MujocoEnv, utils.EzPickle):
         )
 
     def step(self, action):
-        xyz_before = self.data.body(1).xpos[:3].copy()
         self.do_simulation(action, self.frame_skip)
-        xyz_after = self.data.body(1).xpos[:3].copy()
 
-        xyz_velocity = (xyz_after - xyz_before) / self.dt
-        x_velocity = float(xyz_velocity[0])
-        x_position = float(xyz_after[0])
-
-        healthy_reward = self._healthy_reward
-        forward_reward = self._forward_reward_weight * x_position
+        x_position = float(self.data.body(1).xpos[0])
+        x_velocity = float(self.data.qvel[0])
+        healthy_reward = 1.0
         ctrl_cost = float(np.sum(action ** 2) * self._ctrl_cost_weight)
         cfrc_cost = float(np.sum(self.data.cfrc_ext[1:] ** 2) * self._cfrc_cost_weight)
 
-        terminated = self._is_terminated(xyz_velocity)
-        reward = healthy_reward + forward_reward - ctrl_cost - cfrc_cost
+        terminated = self._is_terminated()
+        reward = healthy_reward + x_position - ctrl_cost - cfrc_cost
 
         info = {
             "healthy_reward": -10.0 if terminated else healthy_reward,
-            "forward_reward": forward_reward,
             "x_position": x_position,
-            "y_position": float(xyz_after[1]),
+            "y_position": float(self.data.body(1).xpos[1]),
             "ctrl_cost": ctrl_cost,
             "cfrc_cost": cfrc_cost,
             "x_velocity": x_velocity,
@@ -101,26 +87,11 @@ class EvalHillEnv(MujocoEnv, utils.EzPickle):
             self.render()
         return self._get_obs(), reward, terminated, False, info
 
-    def _is_terminated(self, xyz_velocity: np.ndarray) -> bool:
-        qacc = self.data.qacc
-        if np.any(np.isnan(qacc) | np.isinf(qacc) | (np.abs(qacc) > 1e6)):
+    def _is_terminated(self) -> bool:
+        if not np.isfinite(self.state_vector()).all():
             return True
-        if self._torso_upside_down():
-            return True
-        if np.linalg.norm(xyz_velocity) < 1e-2:
-            self._stuck_count += 1
-            if self._stuck_count > 10 / self.dt:
-                return True
-        else:
-            self._stuck_count = 0
-        return False
-
-    def _torso_rzz(self) -> float:
         R = self.data.body(1).xmat.reshape(3, 3)
-        return float(R[2, 2])
-
-    def _torso_upside_down(self) -> bool:
-        return self._torso_rzz() < 0.2
+        return float(R[2, 2]) < 0.5
 
     def _get_obs(self):
         return np.concatenate((self.data.qpos.flat[2:], self.data.qvel.flat.copy()))
@@ -130,7 +101,6 @@ class EvalHillEnv(MujocoEnv, utils.EzPickle):
         qpos = self.init_qpos + self.np_random.uniform(-noise, noise, size=self.model.nq)
         qvel = self.init_qvel + noise ** 2 * self.np_random.standard_normal(self.model.nv)
         self.set_state(qpos, qvel)
-        self._stuck_count = 0
         return self._get_obs()
 
     def _get_reset_info(self):
