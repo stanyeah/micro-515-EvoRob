@@ -506,15 +506,27 @@ def evaluate_checkpoint(
     print(f"Controller: {ctrl_name}  |  n_weights={world.n_weights}"
           f"  |  genotype size={world.n_params}\n")
 
-    terrains = {
-        "flat": ("FlatEnv-v0", world.flat_world_file),
-        "ice":  ("IceEnv-v0",  world.ice_world_file),
-        "hill": ("HillEnv-v0", world.hill_world_file),
-    }
+    from evorob.world.envs.eval_flat import EvalFlatEnv
+    from evorob.world.envs.eval_hill import EvalHillEnv
+    from evorob.world.envs.eval_ice import EvalIceEnv
 
-    def _neutral(info: dict) -> float:
+    # Instantiate env classes directly (not gym.make) so each terrain loads its
+    # own world XML — flat and ice must not share the same MuJoCo model.
+    terrain_specs = {
+        "flat": (EvalFlatEnv, world.flat_world_file, "velocity"),
+        "ice":  (EvalIceEnv,  world.ice_world_file,  "velocity"),
+        "hill": (EvalHillEnv, world.hill_world_file, "position"),
+    }
+    _expected_floor_mu = {"flat": 1.0, "ice": 0.2}
+
+    def _forward_term(info: dict, forward_mode: str) -> float:
+        if forward_mode == "velocity":
+            return float(info.get("x_velocity", 0.0))
+        return float(info.get("x_position", 0.0))
+
+    def _neutral(info: dict, forward_mode: str) -> float:
         return (float(info.get("healthy_reward", 1.0))
-                + float(info.get("x_position",   0.0))
+                + _forward_term(info, forward_mode)
                 - float(info.get("ctrl_cost",     0.0))
                 - float(info.get("cfrc_cost",     0.0)))
 
@@ -526,10 +538,28 @@ def evaluate_checkpoint(
     def _component_stats(rows: list[dict], key: str) -> dict:
         return _stats([r[key] for r in rows])
 
-    def _run(env_id: str, world_file: str) -> tuple[list, list, list]:
+    def _run(terrain_name: str, env_cls, world_file: str,
+             forward_mode: str) -> tuple[list, list, list, float]:
+        if terrain_name == "ice" and os.path.realpath(world_file) == os.path.realpath(
+                world.flat_world_file):
+            raise RuntimeError(
+                "Ice evaluation is using the flat world XML — check world.ice_world_file."
+            )
+
+        env = env_cls(robot_path=world_file, max_episode_steps=MAX_STEPS)
+        floor_mu = float(env.model.geom("floor").friction[0])
+        expected_mu = _expected_floor_mu.get(terrain_name)
+        if expected_mu is not None and abs(floor_mu - expected_mu) > 0.05:
+            env.close()
+            raise RuntimeError(
+                f"{terrain_name}: floor friction {floor_mu:.2f} != expected "
+                f"{expected_mu:.2f} (xml={world_file})"
+            )
+        print(f"  {terrain_name}: {env_cls.__name__}  floor_mu={floor_mu:.2f}  "
+              f"xml={world_file}", flush=True)
+
+        upright_weight = float(getattr(env, "_upright_weight", 0.0))
         rng = np.random.default_rng(SEED)
-        env = gym.make(env_id, robot_path=world_file, max_episode_steps=MAX_STEPS)
-        upright_weight = float(getattr(env.unwrapped, "_upright_weight", 0.0))
         rewards = []
         y_stats = []
         component_rows = []
@@ -545,6 +575,7 @@ def evaluate_checkpoint(
             y_last = y0 if np.isfinite(y0) else 0.0
 
             healthy_sum = 0.0
+            forward_sum = 0.0
             x_pos_sum = 0.0
             ctrl_sum = 0.0
             cfrc_sum = 0.0
@@ -560,12 +591,13 @@ def evaluate_checkpoint(
                 if world.sensor_fn is not None:
                     obs = world.sensor_fn(obs)
                 healthy_sum += float(info.get("healthy_reward", 0.0))
+                forward_sum += _forward_term(info, forward_mode)
                 x_pos_sum += float(info.get("x_position", 0.0))
                 ctrl_sum += float(info.get("ctrl_cost", 0.0))
                 cfrc_sum += float(info.get("cfrc_cost", 0.0))
                 upright_sum += float(info.get("upright_bonus", 0.0))
                 env_reward_sum += float(reward)
-                total += _neutral(info)
+                total += _neutral(info, forward_mode)
                 n_steps += 1
                 y = float(info.get("y_position", float("nan")))
                 if np.isfinite(y):
@@ -575,7 +607,7 @@ def evaluate_checkpoint(
                     y_last = y
                 done = terminated or truncated
             upright_term_sum = upright_weight * upright_sum
-            training_total = (healthy_sum + x_pos_sum - ctrl_sum - cfrc_sum
+            training_total = (healthy_sum + forward_sum - ctrl_sum - cfrc_sum
                               + upright_term_sum)
             rewards.append(total)
             if not np.isfinite(y_min):
@@ -590,6 +622,7 @@ def evaluate_checkpoint(
             })
             component_rows.append({
                 "healthy_reward": healthy_sum,
+                "forward_reward": forward_sum,
                 "x_position": x_pos_sum,
                 "ctrl_cost": ctrl_sum,
                 "cfrc_cost": cfrc_sum,
@@ -603,11 +636,11 @@ def evaluate_checkpoint(
         env.close()
         return rewards, y_stats, component_rows, upright_weight
 
-    def _record(env_id: str, world_file: str, out_path: str) -> None:
+    def _record(env_cls, world_file: str, out_path: str) -> None:
         try:
             import imageio
-            env = gym.make(env_id, robot_path=world_file,
-                           render_mode="rgb_array", max_episode_steps=MAX_STEPS)
+            env = env_cls(robot_path=world_file, render_mode="rgb_array",
+                          max_episode_steps=MAX_STEPS)
             world.controller.reset_controller(batch_size=1)
             obs, _ = env.reset(seed=SEED)
             if world.sensor_fn is not None:
@@ -636,9 +669,11 @@ def evaluate_checkpoint(
     breakdown = {}
     upright_weights = {}
 
-    for terrain_name, (env_id, world_file) in terrains.items():
+    for terrain_name, (env_cls, world_file, forward_mode) in terrain_specs.items():
         print(f"  Running {terrain_name}  ({n_episodes} episodes)...", flush=True)
-        rewards, y_rows, comp_rows, uw = _run(env_id, world_file)
+        rewards, y_rows, comp_rows, uw = _run(
+            terrain_name, env_cls, world_file, forward_mode,
+        )
         results[terrain_name] = _stats(rewards)
         lateral_y[terrain_name] = y_rows
         breakdown[terrain_name] = comp_rows
@@ -673,7 +708,8 @@ def evaluate_checkpoint(
 
     component_keys = [
         ("healthy_reward", "+"),
-        ("x_position", "+"),
+        ("forward_reward", "+"),
+        ("x_position", "+ abs x diag"),
         ("ctrl_cost", "−"),
         ("cfrc_cost", "−"),
         ("upright_bonus", "+ raw"),
@@ -697,8 +733,8 @@ def evaluate_checkpoint(
 
     # --- Record one video per terrain ---
     print("Recording videos...")
-    for terrain_name, (env_id, world_file) in terrains.items():
-        _record(env_id, world_file, join(output_dir, f"evaluation_{terrain_name}.mp4"))
+    for terrain_name, (env_cls, world_file, _forward_mode) in terrain_specs.items():
+        _record(env_cls, world_file, join(output_dir, f"evaluation_{terrain_name}.mp4"))
 
     # --- Score file ---
     score_path = join(output_dir, "evaluation_score.txt")
@@ -712,7 +748,8 @@ def evaluate_checkpoint(
                 f"  (controller={world.n_weights}, body={world.n_body_params})\n")
         f.write(f"Checkpoint      : {checkpoint_dir}\n")
         f.write(f"Episodes/terrain: {n_episodes}\n")
-        f.write(f"Reward          : healthy_reward + x_position - ctrl_cost - cfrc_cost\n\n")
+        f.write("Reward          : healthy + forward - ctrl_cost - cfrc_cost\n")
+        f.write("                  (forward = x_velocity on flat/ice, x_position on hill)\n\n")
 
         f.write("=" * col + "\n")
         f.write("SUMMARY\n")
@@ -755,13 +792,13 @@ def evaluate_checkpoint(
         f.write("Reward component breakdown (per-episode sums)\n")
         f.write("=" * col + "\n\n")
         f.write("Each value is the sum over steps in one episode.\n")
-        f.write("Training:  healthy + x_position - ctrl_cost - cfrc_cost"
+        f.write("Training:  healthy + forward - ctrl_cost - cfrc_cost"
                 " + upright_weight * upright_bonus\n")
-        f.write("Neutral:   healthy + x_position - ctrl_cost - cfrc_cost"
-                "  (evaluation_score.txt totals)\n\n")
+        f.write("  forward = sum(x_velocity) on flat/ice, sum(x_position) on hill\n")
+        f.write("Neutral:   same as training without upright term\n\n")
 
         summary_keys = [
-            "healthy_reward", "x_position", "ctrl_cost", "cfrc_cost",
+            "healthy_reward", "forward_reward", "x_position", "ctrl_cost", "cfrc_cost",
             "upright_bonus", "upright_term", "neutral_total",
             "training_total", "env_reward_sum", "n_steps",
         ]
@@ -781,13 +818,13 @@ def evaluate_checkpoint(
             f.write("\n")
             f.write("Per-episode detail\n")
             f.write("-" * col + "\n")
-            f.write(f"{'Ep':>4}  {'healthy':>9} {'x_pos':>9} {'ctrl':>9} {'cfrc':>9}"
-                    f" {'upright':>9} {'up_term':>9} {'neutral':>9}"
+            f.write(f"{'Ep':>4}  {'healthy':>9} {'forward':>9} {'x_pos':>9} {'ctrl':>9}"
+                    f" {'cfrc':>9} {'upright':>9} {'up_term':>9} {'neutral':>9}"
                     f" {'train':>9} {'steps':>6}\n")
             for i, r in enumerate(rows):
                 f.write(
-                    f"{i + 1:4d}  {r['healthy_reward']:9.2f} {r['x_position']:9.2f}"
-                    f" {r['ctrl_cost']:9.2f} {r['cfrc_cost']:9.2f}"
+                    f"{i + 1:4d}  {r['healthy_reward']:9.2f} {r['forward_reward']:9.2f}"
+                    f" {r['x_position']:9.2f} {r['ctrl_cost']:9.2f} {r['cfrc_cost']:9.2f}"
                     f" {r['upright_bonus']:9.2f} {r['upright_term']:9.2f}"
                     f" {r['neutral_total']:9.2f} {r['training_total']:9.2f}"
                     f" {r['n_steps']:6d}\n"

@@ -20,7 +20,7 @@ class EvalFlatEnv(MujocoEnv, utils.EzPickle):
     missed. The stuck check uses x-y velocity only so a robot that is purely
     falling/bouncing in z is still allowed (z-bound termination handles that).
 
-    Training reward:  healthy_reward + x_position - ctrl_cost - cfrc_cost
+    Training reward:  healthy_reward + x_velocity - ctrl_cost - cfrc_cost
     + upright_weight * R[2,2]  (torso upright bonus; training-only shaping)
 
     Termination uses R[2,2] < 0 (full flip), not a soft tilt cutoff — tilt pressure
@@ -39,7 +39,7 @@ class EvalFlatEnv(MujocoEnv, utils.EzPickle):
         robot_path: str,
         frame_skip: int = 5,
         default_camera_config: dict = DEFAULT_CAMERA_CONFIG,
-        ctrl_cost_weight: float = 1.0,
+        ctrl_cost_weight: float = 0.5,
         cfrc_cost_weight: float = 5e-4,
         upright_weight: float = 1.0,
         reset_noise_scale: float = 0.1,
@@ -91,7 +91,7 @@ class EvalFlatEnv(MujocoEnv, utils.EzPickle):
         upright_bonus = self._torso_rzz()
 
         terminated = self._is_terminated(xyz_velocity)
-        reward = (healthy_reward + x_position - ctrl_cost - cfrc_cost
+        reward = (healthy_reward + x_velocity - ctrl_cost - cfrc_cost
                   + self._upright_weight * upright_bonus)
 
         info = {
