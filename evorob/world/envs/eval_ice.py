@@ -11,7 +11,8 @@ DEFAULT_CAMERA_CONFIG = {"distance": 5.0}
 class EvalIceEnv(MujocoEnv, utils.EzPickle):
     """Ice terrain evaluation environment.
 
-    Termination: torso height z outside [0.2, 1.0] m, or non-finite state.
+    Termination: torso flip (R[2,2] < 0.0), height z outside [0.2, 1.0] m,
+    or non-finite state.
 
     Training reward:  healthy_reward + x_velocity - ctrl_cost - cfrc_cost
     (ctrl_cost_weight=0.5 by default).
@@ -90,6 +91,9 @@ class EvalIceEnv(MujocoEnv, utils.EzPickle):
 
     def _is_terminated(self) -> bool:
         if not np.isfinite(self.state_vector()).all():
+            return True
+        R = self.data.body(1).xmat.reshape(3, 3)
+        if float(R[2, 2]) < 0.0:
             return True
         z = float(self.data.qpos[2])
         return z < 0.2 or z > 1.0
