@@ -78,8 +78,8 @@ class FinalWorld(World):
 
     Genotype layout
     -----------------
-    * mind_only:  [ Hebbian rule params (2240 @ h=16) ] — body from FIXED_BODY_GENOTYPE
-    * mind_body:  [ Hebbian rule params (2240 @ h=16) | body params (8) ]
+    * mind_only:  [ Hebbian rule params (1120 @ h=8) ] — body from FIXED_BODY_GENOTYPE
+    * mind_body:  [ Hebbian rule params (1120 @ h=8) | body params (8) ]
 
     Each call to evaluate_individual generates the robot body XML, injects it
     into every terrain template, then runs the controller in parallel episodes.
@@ -94,7 +94,7 @@ class FinalWorld(World):
             )
 
         self.controller = HebbianController(
-            input_size=27, output_size=8, hidden_size=16
+            input_size=27, output_size=8, hidden_size=8
         )
 
         if self.evolution_mode == "mind_only":
@@ -480,9 +480,9 @@ def evaluate_checkpoint(
 
     fixed_body = _load("fixed_body_genotype.npy")
     x_size = int(np.asarray(x_best).size)
-    if x_size == 2240:
+    if x_size == 1120:
         ckpt_mode = "mind_only"
-    elif x_size == 2248:
+    elif x_size == 1128:
         ckpt_mode = "mind_body"
     else:
         ckpt_mode = EVOLUTION_MODE

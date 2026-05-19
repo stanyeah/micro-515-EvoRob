@@ -40,7 +40,7 @@ def _zscore_obs_sensor(mean: np.ndarray, std: np.ndarray):
 _FIXED_BODY_GENOTYPE = np.array(
     [-0.6, 0.2, -0.6, 0.2, -0.6, 0.2, -0.6, 0.2], dtype=np.float64
 )
-_HEBBIAN_CTRL_GENES = 2240   # 27→16→8 Hebbian A,B,C,D coefficients
+_HEBBIAN_CTRL_GENES = 1120   # 27→8→8 Hebbian A,B,C,D coefficients
 _MIND_BODY_GENES = _HEBBIAN_CTRL_GENES + 8
 
 
@@ -96,7 +96,7 @@ class EvalWorld(World):
     @staticmethod
     def _default_controller():
         from evorob.world.robot.controllers.mlp_hebbian import HebbianController
-        return HebbianController(input_size=27, output_size=8, hidden_size=16)
+        return HebbianController(input_size=27, output_size=8, hidden_size=8)
 
     def set_controller(self, controller: Controller) -> None:
         """Override the default MLP controller.
@@ -118,7 +118,7 @@ class EvalWorld(World):
             if self.n_weights != _HEBBIAN_CTRL_GENES:
                 raise ValueError(
                     f"mind-only checkpoint ({genotype_size} genes) requires a controller "
-                    f"with {_HEBBIAN_CTRL_GENES} parameters (Hebbian 27→16→8); "
+                    f"with {_HEBBIAN_CTRL_GENES} parameters (Hebbian 27→8→8); "
                     f"got {self.n_weights} from {type(self.controller).__name__}."
                 )
         elif genotype_size == _MIND_BODY_GENES:

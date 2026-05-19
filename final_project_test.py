@@ -22,7 +22,7 @@ Quick-start (recommended)
     python final_project_test.py --best_dir_path results/final_mind_body
 
 The directory must contain x_best.npy and Robot.xml (from training checkpoints).
-mind_only (2240 genes @ hidden_size=16): also include fixed_body_genotype.npy if not using Option A
+mind_only (1120 genes @ hidden_size=8): also include fixed_body_genotype.npy if not using Option A
 load_from_checkpoint (saved automatically during training).
 
 Option B — supply files manually
@@ -63,7 +63,7 @@ from evorob.world.eval_world import EvalWorld
 # Must match final_project_train.py (Hebbian 27→8→8).  None uses EvalWorld default.
 from evorob.world.robot.controllers.mlp_hebbian import HebbianController
 
-MY_CONTROLLER = HebbianController(input_size=27, output_size=8, hidden_size=16)
+MY_CONTROLLER = HebbianController(input_size=27, output_size=8, hidden_size=8)
 
 # --- Paths ---
 # Option A: training results directory (x_best.npy, Robot.xml, …)
