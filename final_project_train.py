@@ -36,6 +36,7 @@ import numpy as np
 import scipy.ndimage
 from PIL import Image
 from gymnasium.vector import AsyncVectorEnv
+from gymnasium.wrappers import TimeLimit
 
 import evorob.world                         # registers EvalEnv-v0
 from evorob.algorithms.nsga import NSGAII
@@ -546,11 +547,11 @@ def evaluate_checkpoint(
                 "Ice evaluation is using the flat world XML — check world.ice_world_file."
             )
 
-        env = env_cls(robot_path=world_file, max_episode_steps=MAX_STEPS)
-        floor_mu = float(env.model.geom("floor").friction[0])
+        base_env = env_cls(robot_path=world_file)
+        floor_mu = float(base_env.model.geom("floor").friction[0])
         expected_mu = _expected_floor_mu.get(terrain_name)
         if expected_mu is not None and abs(floor_mu - expected_mu) > 0.05:
-            env.close()
+            base_env.close()
             raise RuntimeError(
                 f"{terrain_name}: floor friction {floor_mu:.2f} != expected "
                 f"{expected_mu:.2f} (xml={world_file})"
@@ -558,7 +559,8 @@ def evaluate_checkpoint(
         print(f"  {terrain_name}: {env_cls.__name__}  floor_mu={floor_mu:.2f}  "
               f"xml={world_file}", flush=True)
 
-        upright_weight = float(getattr(env, "_upright_weight", 0.0))
+        upright_weight = float(getattr(base_env, "_upright_weight", 0.0))
+        env = TimeLimit(base_env, MAX_STEPS)
         rng = np.random.default_rng(SEED)
         rewards = []
         y_stats = []
@@ -639,8 +641,8 @@ def evaluate_checkpoint(
     def _record(env_cls, world_file: str, out_path: str) -> None:
         try:
             import imageio
-            env = env_cls(robot_path=world_file, render_mode="rgb_array",
-                          max_episode_steps=MAX_STEPS)
+            base_env = env_cls(robot_path=world_file, render_mode="rgb_array")
+            env = TimeLimit(base_env, MAX_STEPS)
             world.controller.reset_controller(batch_size=1)
             obs, _ = env.reset(seed=SEED)
             if world.sensor_fn is not None:

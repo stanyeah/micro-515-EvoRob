@@ -12,7 +12,7 @@ class EvalIceEnv(MujocoEnv, utils.EzPickle):
     """Ice terrain evaluation environment.
 
     Termination: robot is terminated when the torso height z falls outside
-    [0.2, 1.0] m, the torso flips upside-down (R[2,2] < 0), the robot is not
+    [0.2, 1.0] m, the torso tilts too far (R[2,2] < 0.2), the robot is not
     making forward/lateral progress (||v_xy|| < 1 cm/s for > 10 s), or state
     is non-finite. Upside-down and stuck checks are added for symmetry with
     EvalHillEnv — they kill the "stand still and farm healthy_reward" exploit
@@ -23,7 +23,7 @@ class EvalIceEnv(MujocoEnv, utils.EzPickle):
     Training reward:  healthy_reward + x_velocity - ctrl_cost - cfrc_cost
     + upright_weight * R[2,2]  (torso upright bonus; training-only shaping)
 
-    Termination uses R[2,2] < 0 (full flip). Tune upright_weight on the slippery surface.
+    Termination uses R[2,2] < 0.2 (severe tilt / near flip). Tune upright_weight on the slippery surface.
 
     The info dict always exposes the four keys required by the neutral
     leaderboard formula: healthy_reward, x_position, ctrl_cost, cfrc_cost.
@@ -38,7 +38,7 @@ class EvalIceEnv(MujocoEnv, utils.EzPickle):
         default_camera_config: dict = DEFAULT_CAMERA_CONFIG,
         ctrl_cost_weight: float = 0.5,
         cfrc_cost_weight: float = 5e-4,
-        upright_weight: float = 1.0,
+        upright_weight: float = 3.0,
         reset_noise_scale: float = 0.1,
         **kwargs,
     ):
@@ -126,7 +126,7 @@ class EvalIceEnv(MujocoEnv, utils.EzPickle):
         return float(R[2, 2])
 
     def _torso_upside_down(self) -> bool:
-        return self._torso_rzz() < 0.0
+        return self._torso_rzz() < 0.2
 
     def _get_obs(self):
         return np.concatenate((self.data.qpos.flat[2:], self.data.qvel.flat.copy()))

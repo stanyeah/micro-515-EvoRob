@@ -11,7 +11,7 @@ DEFAULT_CAMERA_CONFIG = {"distance": 5.0}
 class EvalHillEnv(MujocoEnv, utils.EzPickle):
     """Hill terrain evaluation environment.
 
-    Termination: robot is terminated when it flips upside-down (R[2,2] < 0),
+    Termination: robot is terminated when the torso tilts too far (R[2,2] < 0.2),
     gets stuck (velocity < 1 cm/s for > 10 s), or produces NaN/Inf accelerations.
     Height-based termination is not used since the robot legitimately climbs.
 
@@ -31,7 +31,7 @@ class EvalHillEnv(MujocoEnv, utils.EzPickle):
         default_camera_config: dict = DEFAULT_CAMERA_CONFIG,
         ctrl_cost_weight: float = 0.5,
         cfrc_cost_weight: float = 5e-4,
-        upright_weight: float = 1.0,
+        upright_weight: float = 3.0,
         reset_noise_scale: float = 0.1,
         **kwargs,
     ):
@@ -118,7 +118,7 @@ class EvalHillEnv(MujocoEnv, utils.EzPickle):
         return float(R[2, 2])
 
     def _torso_upside_down(self) -> bool:
-        return self._torso_rzz() < 0.0
+        return self._torso_rzz() < 0.2
 
     def _get_obs(self):
         return np.concatenate((self.data.qpos.flat[2:], self.data.qvel.flat.copy()))
