@@ -444,7 +444,8 @@ def evaluate_checkpoint(
     """Evaluate the best genotype from a checkpoint on all three training terrains.
 
     Loads x_best.npy, evaluates it on flat, ice, and hill for n_episodes each,
-    prints per-episode scores, records one video per terrain, and writes a score file.
+    prints per-episode scores, records one video per terrain, and writes score
+    and reward-component breakdown files.
 
     Args:
         checkpoint_dir: Path to your NSGA-II checkpoint folder.
@@ -522,11 +523,16 @@ def evaluate_checkpoint(
         return dict(mean=float(arr.mean()), std=float(arr.std()),
                     best=float(arr.max()), worst=float(arr.min()), values=values)
 
-    def _run(env_id: str, world_file: str) -> tuple[list, list]:
+    def _component_stats(rows: list[dict], key: str) -> dict:
+        return _stats([r[key] for r in rows])
+
+    def _run(env_id: str, world_file: str) -> tuple[list, list, list]:
         rng = np.random.default_rng(SEED)
         env = gym.make(env_id, robot_path=world_file, max_episode_steps=MAX_STEPS)
+        upright_weight = float(getattr(env.unwrapped, "_upright_weight", 0.0))
         rewards = []
         y_stats = []
+        component_rows = []
         for ep in range(n_episodes):
             world.controller.reset_controller(batch_size=1)
             obs, info0 = env.reset(seed=int(rng.integers(0, 2 ** 31)))
@@ -538,15 +544,29 @@ def evaluate_checkpoint(
             y_abs_max = abs(y0) if np.isfinite(y0) else 0.0
             y_last = y0 if np.isfinite(y0) else 0.0
 
+            healthy_sum = 0.0
+            x_pos_sum = 0.0
+            ctrl_sum = 0.0
+            cfrc_sum = 0.0
+            upright_sum = 0.0
+            env_reward_sum = 0.0
+            n_steps = 0
             total, done = 0.0, False
             while not done:
                 action = world.controller.get_action(obs)
                 if action.ndim > 1:
                     action = action.squeeze(0)
-                obs, _, terminated, truncated, info = env.step(action)
+                obs, reward, terminated, truncated, info = env.step(action)
                 if world.sensor_fn is not None:
                     obs = world.sensor_fn(obs)
+                healthy_sum += float(info.get("healthy_reward", 0.0))
+                x_pos_sum += float(info.get("x_position", 0.0))
+                ctrl_sum += float(info.get("ctrl_cost", 0.0))
+                cfrc_sum += float(info.get("cfrc_cost", 0.0))
+                upright_sum += float(info.get("upright_bonus", 0.0))
+                env_reward_sum += float(reward)
                 total += _neutral(info)
+                n_steps += 1
                 y = float(info.get("y_position", float("nan")))
                 if np.isfinite(y):
                     y_min = min(y_min, y)
@@ -554,6 +574,9 @@ def evaluate_checkpoint(
                     y_abs_max = max(y_abs_max, abs(y))
                     y_last = y
                 done = terminated or truncated
+            upright_term_sum = upright_weight * upright_sum
+            training_total = (healthy_sum + x_pos_sum - ctrl_sum - cfrc_sum
+                              + upright_term_sum)
             rewards.append(total)
             if not np.isfinite(y_min):
                 y_min = y_last
@@ -565,8 +588,20 @@ def evaluate_checkpoint(
                 "y_min": y_min,
                 "y_max": y_max,
             })
+            component_rows.append({
+                "healthy_reward": healthy_sum,
+                "x_position": x_pos_sum,
+                "ctrl_cost": ctrl_sum,
+                "cfrc_cost": cfrc_sum,
+                "upright_bonus": upright_sum,
+                "upright_term": upright_term_sum,
+                "neutral_total": total,
+                "training_total": training_total,
+                "env_reward_sum": env_reward_sum,
+                "n_steps": n_steps,
+            })
         env.close()
-        return rewards, y_stats
+        return rewards, y_stats, component_rows, upright_weight
 
     def _record(env_id: str, world_file: str, out_path: str) -> None:
         try:
@@ -598,12 +633,16 @@ def evaluate_checkpoint(
     os.makedirs(output_dir, exist_ok=True)
     results = {}
     lateral_y = {}
+    breakdown = {}
+    upright_weights = {}
 
     for terrain_name, (env_id, world_file) in terrains.items():
         print(f"  Running {terrain_name}  ({n_episodes} episodes)...", flush=True)
-        rewards, y_rows = _run(env_id, world_file)
+        rewards, y_rows, comp_rows, uw = _run(env_id, world_file)
         results[terrain_name] = _stats(rewards)
         lateral_y[terrain_name] = y_rows
+        breakdown[terrain_name] = comp_rows
+        upright_weights[terrain_name] = uw
 
     # Per-episode 3-column table
     t_names = list(results.keys())
@@ -630,6 +669,30 @@ def evaluate_checkpoint(
     for n in t_names:
         am = np.asarray([r["y_abs_max"] for r in lateral_y[n]], dtype=float)
         print(f"    {n:<5} mean={am.mean():.3f}  worst_episode={am.max():.3f}")
+    print()
+
+    component_keys = [
+        ("healthy_reward", "+"),
+        ("x_position", "+"),
+        ("ctrl_cost", "−"),
+        ("cfrc_cost", "−"),
+        ("upright_bonus", "+ raw"),
+        ("upright_term", "+"),
+        ("neutral_total", "="),
+        ("training_total", "="),
+        ("env_reward_sum", "="),
+    ]
+    print("  Reward components (episode sums, mean over episodes):")
+    hdr_c = f"  {'Component':<16}" + "".join(f"{n:>12}" for n in t_names)
+    print(hdr_c)
+    print("  " + "-" * (len(hdr_c) - 2))
+    for key, _sign in component_keys:
+        row = f"  {key:<16}" + "".join(
+            f"{_component_stats(breakdown[n], key)['mean']:12.2f}" for n in t_names
+        )
+        print(row)
+    step_means = {n: float(np.mean([r["n_steps"] for r in breakdown[n]])) for n in t_names}
+    print(f"  {'n_steps':<16}" + "".join(f"{step_means[n]:12.1f}" for n in t_names))
     print()
 
     # --- Record one video per terrain ---
@@ -686,7 +749,53 @@ def evaluate_checkpoint(
             f.write(f"  Summary: mean |y|_max={am.mean():.4f}  max={am.max():.4f}  "
                     f"mean |y_final|={np.abs(yf).mean():.4f}\n\n")
 
+    breakdown_path = join(output_dir, "reward_breakdown.txt")
+    with open(breakdown_path, "w") as f:
+        f.write("=" * col + "\n")
+        f.write("Reward component breakdown (per-episode sums)\n")
+        f.write("=" * col + "\n\n")
+        f.write("Each value is the sum over steps in one episode.\n")
+        f.write("Training:  healthy + x_position - ctrl_cost - cfrc_cost"
+                " + upright_weight * upright_bonus\n")
+        f.write("Neutral:   healthy + x_position - ctrl_cost - cfrc_cost"
+                "  (evaluation_score.txt totals)\n\n")
+
+        summary_keys = [
+            "healthy_reward", "x_position", "ctrl_cost", "cfrc_cost",
+            "upright_bonus", "upright_term", "neutral_total",
+            "training_total", "env_reward_sum", "n_steps",
+        ]
+        for terrain_name in t_names:
+            uw = upright_weights[terrain_name]
+            rows = breakdown[terrain_name]
+            f.write("=" * col + "\n")
+            f.write(f"{terrain_name.upper()}  (upright_weight={uw})\n")
+            f.write("=" * col + "\n\n")
+            f.write(f"{'Component':<18} {'Mean':>10} {'Std':>10}"
+                    f" {'Best':>10} {'Worst':>10}\n")
+            f.write("-" * col + "\n")
+            for key in summary_keys:
+                s = _component_stats(rows, key)
+                f.write(f"{key:<18} {s['mean']:10.2f} {s['std']:10.2f}"
+                        f" {s['best']:10.2f} {s['worst']:10.2f}\n")
+            f.write("\n")
+            f.write("Per-episode detail\n")
+            f.write("-" * col + "\n")
+            f.write(f"{'Ep':>4}  {'healthy':>9} {'x_pos':>9} {'ctrl':>9} {'cfrc':>9}"
+                    f" {'upright':>9} {'up_term':>9} {'neutral':>9}"
+                    f" {'train':>9} {'steps':>6}\n")
+            for i, r in enumerate(rows):
+                f.write(
+                    f"{i + 1:4d}  {r['healthy_reward']:9.2f} {r['x_position']:9.2f}"
+                    f" {r['ctrl_cost']:9.2f} {r['cfrc_cost']:9.2f}"
+                    f" {r['upright_bonus']:9.2f} {r['upright_term']:9.2f}"
+                    f" {r['neutral_total']:9.2f} {r['training_total']:9.2f}"
+                    f" {r['n_steps']:6d}\n"
+                )
+            f.write("\n")
+
     print(f"\nScore saved to: {score_path}")
+    print(f"Breakdown saved to: {breakdown_path}")
     print("=" * col)
     for terrain_name, r in results.items():
         print(f"  {terrain_name:<6}: {r['mean']:8.2f} ± {r['std']:7.2f}"
@@ -939,7 +1048,35 @@ if __name__ == "__main__":
         action="store_true",
         help="Short run for pipeline check (few gens, small pop)",
     )
+    parser.add_argument(
+        "--evaluate",
+        metavar="CHECKPOINT_DIR",
+        default=None,
+        help=(
+            "Evaluate x_best.npy from CHECKPOINT_DIR on flat/ice/hill "
+            "(writes evaluation_score.txt and reward_breakdown.txt)"
+        ),
+    )
+    parser.add_argument(
+        "--eval-output",
+        default="evaluation_output",
+        help="Output directory for --evaluate (default: evaluation_output)",
+    )
+    parser.add_argument(
+        "--eval-episodes",
+        type=int,
+        default=256,
+        help="Episodes per terrain for --evaluate (default: 256)",
+    )
     args = parser.parse_args()
+
+    if args.evaluate is not None:
+        evaluate_checkpoint(
+            args.evaluate,
+            output_dir=args.eval_output,
+            n_episodes=args.eval_episodes,
+        )
+        raise SystemExit(0)
 
     # Per-seed results dir so seed sweeps don't overwrite each other.
     if args.seed is not None:
@@ -966,13 +1103,13 @@ if __name__ == "__main__":
             n_workers=args.workers,
         )
     else:
-        # pop=128, n_parents=64 → two clean waves of 64 on the cluster.
+        # pop=256, n_parents=128 → four waves of 64 on the cluster.
         run_multi_task_evolution(
             evolution_mode=args.mode,
             num_generations=100,
-            population_size=128,
-            n_parents=64,
-            n_repeats=3,
+            population_size=256,
+            n_parents=128,
+            n_repeats=6,
             n_steps=1000,
             ckpt_interval=10,
             results_dir=normal_results_dir,
