@@ -5,6 +5,8 @@ from gymnasium import utils
 from gymnasium.envs.mujoco import MujocoEnv
 from gymnasium.spaces import Box
 
+from evorob.world.envs.eval_stuck import advance_stuck_steps, is_stuck_terminated
+
 DEFAULT_CAMERA_CONFIG = {"distance": 5.0}
 
 
@@ -12,7 +14,7 @@ class EvalFlatEnv(MujocoEnv, utils.EzPickle):
     """Flat terrain evaluation environment.
 
     Termination: torso flip (R[2,2] < 0.0), height z outside [0.2, 1.0] m,
-    or non-finite state.
+    stuck (||v_xy|| < 1 cm/s for ~10 s), or non-finite state.
 
     Training reward:  healthy_reward + x_velocity - ctrl_cost - cfrc_cost
     (ctrl_cost_weight=0.5 by default).
@@ -62,12 +64,17 @@ class EvalFlatEnv(MujocoEnv, utils.EzPickle):
         self.observation_space = Box(
             low=-np.inf, high=np.inf, shape=(obs_size,), dtype=np.float64
         )
+        self._stuck_steps = 0
 
     def step(self, action):
+        xy_before = self.data.body(1).xpos[:2].copy()
         x_before = self.data.qpos[0]
         self.do_simulation(action, self.frame_skip)
+        xy_after = self.data.body(1).xpos[:2]
         x_after = self.data.qpos[0]
 
+        xy_velocity = (xy_after - xy_before) / self.dt
+        self._stuck_steps = advance_stuck_steps(self._stuck_steps, xy_velocity, self.dt)
         x_velocity = (x_after - x_before) / self.dt
         healthy_reward = 1.0
         ctrl_cost = float(np.sum(action ** 2) * self._ctrl_cost_weight)
@@ -92,6 +99,8 @@ class EvalFlatEnv(MujocoEnv, utils.EzPickle):
     def _is_terminated(self) -> bool:
         if not np.isfinite(self.state_vector()).all():
             return True
+        if is_stuck_terminated(self._stuck_steps, self.dt):
+            return True
         R = self.data.body(1).xmat.reshape(3, 3)
         if float(R[2, 2]) < 0.0:
             return True
@@ -106,6 +115,7 @@ class EvalFlatEnv(MujocoEnv, utils.EzPickle):
         qpos = self.init_qpos + self.np_random.uniform(-noise, noise, size=self.model.nq)
         qvel = self.init_qvel + noise ** 2 * self.np_random.standard_normal(self.model.nv)
         self.set_state(qpos, qvel)
+        self._stuck_steps = 0
         return self._get_obs()
 
     def _get_reset_info(self):

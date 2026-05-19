@@ -5,13 +5,16 @@ from gymnasium import utils
 from gymnasium.envs.mujoco import MujocoEnv
 from gymnasium.spaces import Box
 
+from evorob.world.envs.eval_stuck import advance_stuck_steps, is_stuck_terminated
+
 DEFAULT_CAMERA_CONFIG = {"distance": 5.0}
 
 
 class EvalHillEnv(MujocoEnv, utils.EzPickle):
     """Hill terrain evaluation environment.
 
-    Termination: torso flip (R[2,2] < 0.0). No height-based termination on hills.
+    Termination: torso flip (R[2,2] < 0.0), stuck (||v_xy|| < 1 cm/s for ~10 s).
+    No height-based termination on hills.
 
     Training reward:  healthy_reward + x_position - ctrl_cost - cfrc_cost
     (ctrl_cost_weight=0.5 by default).
@@ -61,10 +64,15 @@ class EvalHillEnv(MujocoEnv, utils.EzPickle):
         self.observation_space = Box(
             low=-np.inf, high=np.inf, shape=(obs_size,), dtype=np.float64
         )
+        self._stuck_steps = 0
 
     def step(self, action):
+        xy_before = self.data.body(1).xpos[:2].copy()
         self.do_simulation(action, self.frame_skip)
+        xy_after = self.data.body(1).xpos[:2]
 
+        xy_velocity = (xy_after - xy_before) / self.dt
+        self._stuck_steps = advance_stuck_steps(self._stuck_steps, xy_velocity, self.dt)
         x_position = float(self.data.body(1).xpos[0])
         x_velocity = float(self.data.qvel[0])
         healthy_reward = 1.0
@@ -90,6 +98,8 @@ class EvalHillEnv(MujocoEnv, utils.EzPickle):
     def _is_terminated(self) -> bool:
         if not np.isfinite(self.state_vector()).all():
             return True
+        if is_stuck_terminated(self._stuck_steps, self.dt):
+            return True
         R = self.data.body(1).xmat.reshape(3, 3)
         return float(R[2, 2]) < 0.0
 
@@ -101,6 +111,7 @@ class EvalHillEnv(MujocoEnv, utils.EzPickle):
         qpos = self.init_qpos + self.np_random.uniform(-noise, noise, size=self.model.nq)
         qvel = self.init_qvel + noise ** 2 * self.np_random.standard_normal(self.model.nv)
         self.set_state(qpos, qvel)
+        self._stuck_steps = 0
         return self._get_obs()
 
     def _get_reset_info(self):

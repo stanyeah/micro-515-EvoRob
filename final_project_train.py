@@ -784,6 +784,7 @@ def evaluate_checkpoint(
         f.write("Each value is the sum over steps in one episode.\n")
         f.write("Training:  healthy(1.0) + forward - ctrl_cost - cfrc_cost\n")
         f.write("  flat/ice: forward=x_velocity, ctrl_weight=0.5; flip R[2,2]<0, z in [0.2,1]\n")
+        f.write("  all terrains: stuck term ||v_xy||<0.01 m/s for ~10 s\n")
         f.write("  hill: forward=x_position, ctrl_weight=0.5; flip R[2,2]<0\n\n")
 
         summary_keys = [
@@ -876,7 +877,7 @@ def _worker_eval(args):
 # ---------------------------------------------------------------------------
 
 def run_multi_task_evolution(
-    num_generations: int = 100,
+    num_generations: int = 200,
     population_size: int = 100,
     n_parents:       int = 50,
     n_repeats:       int = 3,
@@ -1128,7 +1129,7 @@ if __name__ == "__main__":
         # pop=256, n_parents=128 → four waves of 64 on the cluster.
         run_multi_task_evolution(
             evolution_mode=args.mode,
-            num_generations=100,
+            num_generations=200,
             population_size=256,
             n_parents=128,
             n_repeats=6,
