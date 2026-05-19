@@ -124,9 +124,17 @@ class AntFlatEnvironment(MujocoEnv):
 
         return reward, reward_info
 
+    # def _get_termination(self):
+    #     state = self.state_vector()
+    #     min_z_torso, max_z_torso = (0.26, 1.0)
+    #     is_healthy = np.isfinite(state).all() and min_z_torso <= state[2] <= max_z_torso
+
+    #     return not is_healthy
+    
     def _get_termination(self):
         state = self.state_vector()
         min_z_torso, max_z_torso = (0.26, 1.0)
         is_healthy = np.isfinite(state).all() and min_z_torso <= state[2] <= max_z_torso
-
-        return not is_healthy
+        R = self.data.body(1).xmat.reshape(3, 3)
+        is_upright = R[2, 2] >= 0.0
+        return not (is_healthy and is_upright)

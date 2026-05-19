@@ -119,7 +119,7 @@ class EvalFlatEnv(MujocoEnv, utils.EzPickle):
 
     def _torso_upside_down(self) -> bool:
         R = self.data.body(1).xmat.reshape(3, 3)
-        return float(R[2, 2]) < 0.0
+        return float(R[2, 2]) < 0.5
 
     def _get_obs(self):
         return np.concatenate((self.data.qpos.flat[2:], self.data.qvel.flat.copy()))

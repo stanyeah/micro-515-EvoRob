@@ -157,6 +157,8 @@ class AntHillEnv(MujocoEnv, utils.EzPickle):
             terminated = True
         if self.data.qpos[2] < 0.2 or self.data.qpos[2] > 1.0:
             terminated = True
+        if self.torso_upside_down():   # ← add this
+            terminated = True
         if terminated:
             info["healthy_reward"] = -10
 
