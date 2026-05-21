@@ -2,11 +2,11 @@
 MICRO-515 Final Project — Multi-task Robot Evolution
 =====================================================
 Evolve a legged robot to walk in the +x direction across three training
-environments simultaneously, using a Hebbian MLP controller and NSGA-II.
+environments simultaneously, using a feedforward MLP controller and NSGA-II.
 
 Experiment modes (EVOLUTION_MODE / --mode):
-  mind_only  — evolve Hebbian A,B,C,D rules only; fixed ant-like body
-  mind_body  — co-evolve Hebbian rules and 8 leg-segment lengths
+  mind_only  — evolve MLP weights only; fixed ant-like body
+  mind_body  — co-evolve MLP weights and 8 leg-segment lengths
 
 Training environments (3 objectives)
 -------------------------------------
@@ -42,7 +42,7 @@ import evorob.world                         # registers EvalEnv-v0
 from evorob.algorithms.nsga import NSGAII, scalar_fitness_score
 from evorob.utils.filesys import get_last_checkpoint_dir, get_project_root
 from evorob.world.base import World
-from evorob.world.robot.controllers.mlp_hebbian import HebbianController
+from evorob.world.robot.controllers.mlp import NeuralNetworkController
 from evorob.world.robot.morphology.ant_custom_robot import AntRobot
 
 ROOT_DIR = get_project_root()
@@ -79,8 +79,8 @@ class FinalWorld(World):
 
     Genotype layout
     -----------------
-    * mind_only:  [ Hebbian rule params (1120 @ h=8) ] — body from FIXED_BODY_GENOTYPE
-    * mind_body:  [ Hebbian rule params (1120 @ h=8) | body params (8) ]
+    * mind_only:  [ MLP weights (280 @ 27→8→8) ] — body from FIXED_BODY_GENOTYPE
+    * mind_body:  [ MLP weights (280 @ 27→8→8) | body params (8) ]
 
     Each call to evaluate_individual generates the robot body XML, injects it
     into every terrain template, then runs the controller in parallel episodes.
@@ -94,7 +94,7 @@ class FinalWorld(World):
                 f"got {self.evolution_mode!r}"
             )
 
-        self.controller = HebbianController(
+        self.controller = NeuralNetworkController(
             input_size=27, output_size=8, hidden_size=8
         )
 
@@ -155,19 +155,19 @@ class FinalWorld(World):
     def geno2pheno(self, genotype: np.ndarray):
         """Decode genotype into controller weights and body parameters.
 
-        mind_only:  genotype is all Hebbian genes; body from _fixed_body_genotype.
-        mind_body:  genotype[:n_weights] → rules, genotype[n_weights:] → body genes.
+        mind_only:  genotype is all MLP weights; body from _fixed_body_genotype.
+        mind_body:  genotype[:n_weights] → MLP weights, genotype[n_weights:] → body genes.
 
-        Controller genes are scaled by 0.1 before HebbianController.geno2pheno.
+        Controller weights are passed directly to the controller's geno2pheno.
         Body genes map to lengths via (g + 1) / 4 + 0.1.
 
         Returns (points, connectivity_mat) for AntRobot construction.
         """
         if self.n_body_params == 0:
-            control_params = genotype * 0.1
+            control_params = genotype
             body_genes = self._fixed_body_genotype
         else:
-            control_params = genotype[: self.n_weights] * 0.1
+            control_params = genotype[: self.n_weights]
             body_genes = genotype[self.n_weights :]
         body_params = (body_genes + 1) / 4 + 0.1
         self.controller.geno2pheno(control_params)
@@ -482,10 +482,20 @@ def evaluate_checkpoint(
 
     fixed_body = _load("fixed_body_genotype.npy")
     x_size = int(np.asarray(x_best).size)
-    if x_size == 1120:
+    _MLP_CTRL_GENES = 280
+    _MLP_MIND_BODY_GENES = _MLP_CTRL_GENES + 8
+    if x_size == _MLP_CTRL_GENES:
         ckpt_mode = "mind_only"
-    elif x_size == 1128:
+    elif x_size == _MLP_MIND_BODY_GENES:
         ckpt_mode = "mind_body"
+    elif x_size in (1120, 1128):
+        print(
+            f"ERROR: x_best has {x_size} genes (legacy Hebbian checkpoint). "
+            f"Current training uses feedforward MLP ({_MLP_CTRL_GENES} genes). "
+            "Re-train with the updated final_project_train.py or evaluate with "
+            "final_project_test.py and HebbianController for old checkpoints."
+        )
+        return None
     else:
         ckpt_mode = EVOLUTION_MODE
         print(f"WARNING: unexpected x_best size {x_size}; using EVOLUTION_MODE={ckpt_mode}")
@@ -878,47 +888,81 @@ def save_pareto_front_plot(
     output_path: str,
     generation: int,
 ) -> None:
-    """Save 2-D projections of the current population and Pareto front 0."""
+    """Save 2-D Pareto projections (robust normalized — scales differ across terrains)."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    fitness = np.asarray(fitness, dtype=np.float64)
     obj_names = ["flat", "ice", "hill"]
     pairs = ((0, 1), (0, 2), (1, 2))
+
+    # Robust [0, 1] scaling per objective so hill (often ±1e4) doesn't flatten flat/ice.
+    lo = np.percentile(fitness, 2, axis=0)
+    hi = np.percentile(fitness, 98, axis=0)
+    span = hi - lo
+    span[span < 1e-9] = 1.0
+    plot_f = np.clip((fitness - lo) / span, 0.0, 1.0)
+    if ea.f_best_so_far is not None:
+        plot_best = np.clip((ea.f_best_so_far - lo) / span, 0.0, 1.0)
+    else:
+        plot_best = None
 
     fronts, _ = ea.fast_nondominated_sort(fitness)
     front0 = fronts[0] if fronts else []
 
-    fig, axes = plt.subplots(1, 3, figsize=(14, 4))
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4.8))
     for ax, (i, j) in zip(axes, pairs):
         ax.scatter(
-            fitness[:, i], fitness[:, j],
-            c="lightgray", s=10, alpha=0.65, label="population",
+            plot_f[:, i], plot_f[:, j],
+            c="#b0b0b0", s=12, alpha=0.7, edgecolors="none",
         )
         if front0:
             ax.scatter(
-                fitness[front0, i], fitness[front0, j],
-                c="C0", s=24, alpha=0.85, label="Pareto front 0",
+                plot_f[front0, i], plot_f[front0, j],
+                c="#1f77b4", s=28, alpha=0.9, edgecolors="white", linewidths=0.3,
             )
-        if ea.f_best_so_far is not None:
+        if plot_best is not None:
             ax.scatter(
-                [ea.f_best_so_far[i]], [ea.f_best_so_far[j]],
-                c="red", s=100, marker="*", zorder=5, label="x_best (maximin)",
+                [plot_best[i]], [plot_best[j]],
+                c="red", s=120, marker="*", zorder=5, edgecolors="black", linewidths=0.4,
             )
-        ax.set_xlabel(obj_names[i])
-        ax.set_ylabel(obj_names[j])
-        ax.grid(True, alpha=0.3)
+        ax.set_xlabel(f"{obj_names[i]}  (p2–p98 norm.)")
+        ax.set_ylabel(f"{obj_names[j]}  (p2–p98 norm.)")
+        ax.set_xlim(-0.02, 1.02)
+        ax.set_ylim(-0.02, 1.02)
+        ax.set_aspect("equal", adjustable="box")
+        ax.grid(True, alpha=0.25)
 
-    handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="upper center", ncol=3, fontsize=9)
     title_score = (
         f"{ea.best_scalar_score:.2f}" if ea.best_scalar_score is not None else "n/a"
     )
     fig.suptitle(
-        f"Pareto front — generation {generation}  (best maximin={title_score})",
-        fontsize=11,
+        f"Pareto front — generation {generation}   best maximin = {title_score}",
+        fontsize=12,
+        y=0.98,
     )
-    fig.tight_layout(rect=(0, 0, 1, 0.92))
+    fig.legend(
+        handles=[
+            plt.Line2D([0], [0], marker="o", color="w", markerfacecolor="#b0b0b0",
+                       markersize=8, label="population"),
+            plt.Line2D([0], [0], marker="o", color="w", markerfacecolor="#1f77b4",
+                       markersize=8, label="Pareto front 0"),
+            plt.Line2D([0], [0], marker="*", color="w", markerfacecolor="red",
+                       markersize=12, label="x_best (maximin)"),
+        ],
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.90),
+        ncol=3,
+        fontsize=9,
+        frameon=True,
+    )
+    raw_ranges = "   ".join(
+        f"{n}: [{lo[k]:.0f}, {hi[k]:.0f}]" for k, n in enumerate(obj_names)
+    )
+    fig.text(0.5, 0.02, f"Raw p2–p98 ranges — {raw_ranges}", ha="center", fontsize=8, color="#444")
+
+    fig.subplots_adjust(left=0.06, right=0.98, top=0.82, bottom=0.14, wspace=0.28)
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     fig.savefig(output_path, dpi=120)
     plt.close(fig)
@@ -1105,12 +1149,12 @@ def run_multi_task_evolution(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Multi-task Hebbian evolution (NSGA-II)")
+    parser = argparse.ArgumentParser(description="Multi-task MLP evolution (NSGA-II)")
     parser.add_argument(
         "--mode",
         choices=("mind_only", "mind_body"),
         default=EVOLUTION_MODE,
-        help="mind_only: evolve Hebbian rules only; mind_body: co-evolve rules + legs",
+        help="mind_only: evolve MLP weights only; mind_body: co-evolve weights + legs",
     )
     parser.add_argument(
         "--seed",
@@ -1199,8 +1243,8 @@ if __name__ == "__main__":
             num_generations=200,
             population_size=256,
             n_parents=128,
-            n_repeats=10,
-            n_steps=2000,
+            n_repeats=5,
+            n_steps=1000,
             ckpt_interval=10,
             results_dir=normal_results_dir,
             random_seed=seed_value,

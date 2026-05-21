@@ -22,12 +22,14 @@ Quick-start (recommended)
     python final_project_test.py --best_dir_path results/final_mind_body
 
 The directory must contain x_best.npy and Robot.xml (from training checkpoints).
-mind_only (1120 genes @ hidden_size=8): also include fixed_body_genotype.npy if not using Option A
+mind_only (280 genes @ hidden_size=8): also include fixed_body_genotype.npy if not using Option A
 load_from_checkpoint (saved automatically during training).
 
 Option B — supply files manually
 ----------------------------------
-Set ROBOT_XML_PATH and GENOTYPE_PATH, then use world.geno2pheno (handles ×0.1 scaling).
+Set ROBOT_XML_PATH and GENOTYPE_PATH, then use world.geno2pheno to load controller weights.
+
+Legacy Hebbian checkpoints (1120 genes): set MY_CONTROLLER to HebbianController below.
 
 Submission reminder
 --------------------
@@ -60,10 +62,10 @@ from evorob.world.eval_world import EvalWorld
 # ===========================================================================
 
 # --- Controller ---
-# Must match final_project_train.py (Hebbian 27→8→8).  None uses EvalWorld default.
-from evorob.world.robot.controllers.mlp_hebbian import HebbianController
+# Must match final_project_train.py (feedforward MLP 27→8→8, 280 genes).  None uses EvalWorld default.
+from evorob.world.robot.controllers.mlp import NeuralNetworkController
 
-MY_CONTROLLER = HebbianController(input_size=27, output_size=8, hidden_size=8)
+MY_CONTROLLER = NeuralNetworkController(input_size=27, output_size=8, hidden_size=8)
 
 # --- Paths ---
 # Option A: training results directory (x_best.npy, Robot.xml, …)

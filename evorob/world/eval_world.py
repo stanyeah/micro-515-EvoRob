@@ -40,8 +40,10 @@ def _zscore_obs_sensor(mean: np.ndarray, std: np.ndarray):
 _FIXED_BODY_GENOTYPE = np.array(
     [-0.6, 0.2, -0.6, 0.2, -0.6, 0.2, -0.6, 0.2], dtype=np.float64
 )
-_HEBBIAN_CTRL_GENES = 1120   # 27→8→8 Hebbian A,B,C,D coefficients
-_MIND_BODY_GENES = _HEBBIAN_CTRL_GENES + 8
+_MLP_CTRL_GENES = 280        # 27→8→8 feedforward MLP weights
+_MIND_BODY_GENES = _MLP_CTRL_GENES + 8
+_LEGACY_HEBBIAN_CTRL_GENES = 1120
+_LEGACY_MIND_BODY_GENES = _LEGACY_HEBBIAN_CTRL_GENES + 8
 
 
 class EvalWorld(World):
@@ -95,8 +97,8 @@ class EvalWorld(World):
 
     @staticmethod
     def _default_controller():
-        from evorob.world.robot.controllers.mlp_hebbian import HebbianController
-        return HebbianController(input_size=27, output_size=8, hidden_size=8)
+        from evorob.world.robot.controllers.mlp import NeuralNetworkController
+        return NeuralNetworkController(input_size=27, output_size=8, hidden_size=8)
 
     def set_controller(self, controller: Controller) -> None:
         """Override the default MLP controller.
@@ -111,24 +113,60 @@ class EvalWorld(World):
 
     def _sync_layout_from_genotype_size(self, genotype_size: int) -> None:
         """Align n_weights / n_body_params / n_params with checkpoint genotype length."""
-        if genotype_size == _HEBBIAN_CTRL_GENES:
+        from evorob.world.robot.controllers.mlp_hebbian import HebbianController
+
+        is_hebbian = isinstance(self.controller, HebbianController)
+
+        if genotype_size == _LEGACY_HEBBIAN_CTRL_GENES:
+            if not is_hebbian:
+                raise ValueError(
+                    f"Legacy Hebbian checkpoint ({genotype_size} genes). "
+                    f"Set HebbianController in final_project_test.MY_CONTROLLER, or "
+                    f"re-train with the current feedforward MLP ({_MLP_CTRL_GENES} genes)."
+                )
             self.n_body_params = 0
             self.n_weights = self.controller.n_params
             self.n_params = self.n_weights
-            if self.n_weights != _HEBBIAN_CTRL_GENES:
+            if self.n_weights != _LEGACY_HEBBIAN_CTRL_GENES:
+                raise ValueError(
+                    f"mind-only Hebbian checkpoint ({genotype_size} genes) requires "
+                    f"{_LEGACY_HEBBIAN_CTRL_GENES} controller params; "
+                    f"got {self.n_weights} from {type(self.controller).__name__}."
+                )
+        elif genotype_size == _LEGACY_MIND_BODY_GENES:
+            if not is_hebbian:
+                raise ValueError(
+                    f"Legacy Hebbian checkpoint ({genotype_size} genes). "
+                    f"Set HebbianController in final_project_test.MY_CONTROLLER, or "
+                    f"re-train with the current feedforward MLP ({_MLP_CTRL_GENES} genes)."
+                )
+            self.n_body_params = 8
+            self.n_weights = self.controller.n_params
+            self.n_params = self.n_weights + self.n_body_params
+            if self.n_weights != _LEGACY_HEBBIAN_CTRL_GENES:
+                raise ValueError(
+                    f"mind+body Hebbian checkpoint ({genotype_size} genes) expects "
+                    f"{_LEGACY_HEBBIAN_CTRL_GENES} controller genes; "
+                    f"got {self.n_weights} from {type(self.controller).__name__}."
+                )
+        elif genotype_size == _MLP_CTRL_GENES:
+            self.n_body_params = 0
+            self.n_weights = self.controller.n_params
+            self.n_params = self.n_weights
+            if self.n_weights != _MLP_CTRL_GENES:
                 raise ValueError(
                     f"mind-only checkpoint ({genotype_size} genes) requires a controller "
-                    f"with {_HEBBIAN_CTRL_GENES} parameters (Hebbian 27→8→8); "
+                    f"with {_MLP_CTRL_GENES} parameters (MLP 27→8→8); "
                     f"got {self.n_weights} from {type(self.controller).__name__}."
                 )
         elif genotype_size == _MIND_BODY_GENES:
             self.n_body_params = 8
             self.n_weights = self.controller.n_params
             self.n_params = self.n_weights + self.n_body_params
-            if self.n_weights != _HEBBIAN_CTRL_GENES:
+            if self.n_weights != _MLP_CTRL_GENES:
                 raise ValueError(
                     f"mind+body checkpoint ({genotype_size} genes) expects "
-                    f"{_HEBBIAN_CTRL_GENES} controller genes; "
+                    f"{_MLP_CTRL_GENES} controller genes; "
                     f"got {self.n_weights} from {type(self.controller).__name__}."
                 )
         elif genotype_size == self.n_weights + self.n_body_params:
@@ -136,7 +174,7 @@ class EvalWorld(World):
         else:
             raise ValueError(
                 f"Unexpected genotype length {genotype_size}. "
-                f"Expected {_HEBBIAN_CTRL_GENES} (mind_only) or "
+                f"Expected {_MLP_CTRL_GENES} (mind_only) or "
                 f"{_MIND_BODY_GENES} (mind_body)."
             )
 
@@ -180,13 +218,15 @@ class EvalWorld(World):
         The body morphology is NOT regenerated here — call update_robot_xml first
         to provide the robot XML, then call geno2pheno to load the controller.
         """
+        from evorob.world.robot.controllers.mlp_hebbian import HebbianController
+
         g = np.asarray(genotype, dtype=np.float64).reshape(-1)
         self._sync_layout_from_genotype_size(g.size)
 
-        if self.n_body_params == 0:
-            self.controller.geno2pheno(g * 0.1)
-        else:
-            self.controller.geno2pheno(g[: self.n_weights] * 0.1)
+        ctrl = g if self.n_body_params == 0 else g[: self.n_weights]
+        if isinstance(self.controller, HebbianController):
+            ctrl = ctrl * 0.1
+        self.controller.geno2pheno(ctrl)
 
     # ------------------------------------------------------------------
     # One-shot loader from a FinalWorld checkpoint
