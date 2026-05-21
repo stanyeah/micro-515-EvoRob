@@ -16,8 +16,8 @@ class EvalHillEnv(MujocoEnv, utils.EzPickle):
     Termination: torso flip (R[2,2] < 0.0), stuck (||v_xy|| < 1 cm/s for ~10 s).
     No height-based termination on hills.
 
-    Training reward:  healthy_reward + x_position - ctrl_cost - cfrc_cost
-    (ctrl_cost_weight=0.5 by default).
+    Training reward:  healthy_reward + x_position - ctrl_cost
+    (ctrl_cost_weight=0.25 by default).  cfrc_cost is logged in info only.
 
     The info dict always exposes the four keys required by the neutral
     leaderboard formula: healthy_reward, x_position, ctrl_cost, cfrc_cost.
@@ -30,7 +30,7 @@ class EvalHillEnv(MujocoEnv, utils.EzPickle):
         robot_path: str,
         frame_skip: int = 5,
         default_camera_config: dict = DEFAULT_CAMERA_CONFIG,
-        ctrl_cost_weight: float = 0.5,
+        ctrl_cost_weight: float = 0.25,
         cfrc_cost_weight: float = 5e-4,
         reset_noise_scale: float = 0.1,
         **kwargs,
@@ -80,7 +80,7 @@ class EvalHillEnv(MujocoEnv, utils.EzPickle):
         cfrc_cost = float(np.sum(self.data.cfrc_ext[1:] ** 2) * self._cfrc_cost_weight)
 
         terminated = self._is_terminated()
-        reward = healthy_reward + x_position - ctrl_cost - cfrc_cost
+        reward = healthy_reward + x_position - ctrl_cost
 
         info = {
             "healthy_reward": -10.0 if terminated else healthy_reward,

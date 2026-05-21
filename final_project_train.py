@@ -39,7 +39,7 @@ from gymnasium.vector import AsyncVectorEnv
 from gymnasium.wrappers import TimeLimit
 
 import evorob.world                         # registers EvalEnv-v0
-from evorob.algorithms.nsga import NSGAII
+from evorob.algorithms.nsga import NSGAII, scalar_fitness_score
 from evorob.utils.filesys import get_last_checkpoint_dir, get_project_root
 from evorob.world.base import World
 from evorob.world.robot.controllers.mlp_hebbian import HebbianController
@@ -514,8 +514,8 @@ def evaluate_checkpoint(
     # Instantiate env classes directly (not gym.make) so each terrain loads its
     # own world XML — flat and ice must not share the same MuJoCo model.
     terrain_specs = {
-        "flat": (EvalFlatEnv, world.flat_world_file, "velocity"),
-        "ice":  (EvalIceEnv,  world.ice_world_file,  "velocity"),
+        "flat": (EvalFlatEnv, world.flat_world_file, "position"),
+        "ice":  (EvalIceEnv,  world.ice_world_file,  "position"),
         "hill": (EvalHillEnv, world.hill_world_file, "position"),
     }
     _expected_floor_mu = {"flat": 1.0, "ice": 0.2}
@@ -605,7 +605,7 @@ def evaluate_checkpoint(
                     y_abs_max = max(y_abs_max, abs(y))
                     y_last = y
                 done = terminated or truncated
-            training_total = healthy_sum + forward_sum - ctrl_sum - cfrc_sum
+            training_total = healthy_sum + forward_sum - ctrl_sum
             rewards.append(total)
             if not np.isfinite(y_min):
                 y_min = y_last
@@ -738,8 +738,8 @@ def evaluate_checkpoint(
                 f"  (controller={world.n_weights}, body={world.n_body_params})\n")
         f.write(f"Checkpoint      : {checkpoint_dir}\n")
         f.write(f"Episodes/terrain: {n_episodes}\n")
-        f.write("Reward          : healthy + forward - ctrl_cost - cfrc_cost\n")
-        f.write("                  (forward = x_velocity on flat/ice, x_position on hill)\n\n")
+        f.write("Reward          : healthy + forward - ctrl_cost\n")
+        f.write("                  (forward = x_position on all training terrains)\n\n")
 
         f.write("=" * col + "\n")
         f.write("SUMMARY\n")
@@ -782,10 +782,11 @@ def evaluate_checkpoint(
         f.write("Reward component breakdown (per-episode sums)\n")
         f.write("=" * col + "\n\n")
         f.write("Each value is the sum over steps in one episode.\n")
-        f.write("Training:  healthy(1.0) + forward - ctrl_cost - cfrc_cost\n")
-        f.write("  flat/ice: forward=x_velocity, ctrl_weight=0.5; flip R[2,2]<0, z in [0.2,1]\n")
+        f.write("Training:  healthy(1.0) + forward - ctrl_cost\n")
+        f.write("  all terrains: forward=x_position, ctrl_weight=0.25\n")
+        f.write("  flat/ice: flip R[2,2]<0, z in [0.2,1]\n")
         f.write("  all terrains: stuck term ||v_xy||<0.01 m/s for ~10 s\n")
-        f.write("  hill: forward=x_position, ctrl_weight=0.5; flip R[2,2]<0\n\n")
+        f.write("  hill: flip R[2,2]<0\n\n")
 
         summary_keys = [
             "healthy_reward", "forward_reward", "x_position", "ctrl_cost", "cfrc_cost",
@@ -872,6 +873,58 @@ def _worker_eval(args):
     return idx, fitness, robot_xml
 
 
+def save_pareto_front_plot(
+    ea: NSGAII,
+    fitness: np.ndarray,
+    output_path: str,
+    generation: int,
+) -> None:
+    """Save 2-D projections of the current population and Pareto front 0."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    obj_names = ["flat", "ice", "hill"]
+    pairs = ((0, 1), (0, 2), (1, 2))
+
+    fronts, _ = ea.fast_nondominated_sort(fitness)
+    front0 = fronts[0] if fronts else []
+
+    fig, axes = plt.subplots(1, 3, figsize=(14, 4))
+    for ax, (i, j) in zip(axes, pairs):
+        ax.scatter(
+            fitness[:, i], fitness[:, j],
+            c="lightgray", s=10, alpha=0.65, label="population",
+        )
+        if front0:
+            ax.scatter(
+                fitness[front0, i], fitness[front0, j],
+                c="C0", s=24, alpha=0.85, label="Pareto front 0",
+            )
+        if ea.f_best_so_far is not None:
+            ax.scatter(
+                [ea.f_best_so_far[i]], [ea.f_best_so_far[j]],
+                c="red", s=100, marker="*", zorder=5, label="x_best (maximin)",
+            )
+        ax.set_xlabel(obj_names[i])
+        ax.set_ylabel(obj_names[j])
+        ax.grid(True, alpha=0.3)
+
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="upper center", ncol=3, fontsize=9)
+    title_score = (
+        f"{ea.best_scalar_score:.2f}" if ea.best_scalar_score is not None else "n/a"
+    )
+    fig.suptitle(
+        f"Pareto front — generation {generation}  (best maximin={title_score})",
+        fontsize=11,
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.92))
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    fig.savefig(output_path, dpi=120)
+    plt.close(fig)
+
+
 # ---------------------------------------------------------------------------
 # Main training loop
 # ---------------------------------------------------------------------------
@@ -918,6 +971,7 @@ def run_multi_task_evolution(
     print(f"\nRunning {num_generations} generations  pop={population_size}")
     print(f"Workers    : {n_workers}")
     print(f"Objectives : [flat, ice, hill]")
+    print(f"x_best pick: maximin (best worst-objective score)")
     print(f"Checkpoints: {results_dir}\n")
 
     os.makedirs(results_dir, exist_ok=True)
@@ -975,9 +1029,9 @@ def run_multi_task_evolution(
                 ]
                 for idx, fitness, robot_xml in pool.imap_unordered(_worker_eval, tasks):
                     fitnesses[idx] = fitness
-                    scalar = float(fitness.sum())
-                    if scalar > _best_scalar:
-                        _best_scalar = scalar
+                    score = float(scalar_fitness_score(fitness))
+                    if score > _best_scalar:
+                        _best_scalar = score
                         with open(_best_xml_stage, "w") as fh:
                             fh.write(robot_xml)
             else:
@@ -986,9 +1040,9 @@ def run_multi_task_evolution(
                     fitnesses[idx] = world.evaluate_individual(
                         genotype, n_repeats=n_repeats, n_steps=n_steps
                     )
-                    scalar = float(fitnesses[idx].sum())
-                    if scalar > _best_scalar:
-                        _best_scalar = scalar
+                    score = float(scalar_fitness_score(fitnesses[idx]))
+                    if score > _best_scalar:
+                        _best_scalar = score
                         shutil.copy2(
                             join(world.temp_dir.name, "Robot.xml"),
                             _best_xml_stage,
@@ -999,6 +1053,9 @@ def run_multi_task_evolution(
             if save_ckpt:
                 gen_dir = join(results_dir, str(gen))
                 shutil.copy2(_best_xml_stage, join(gen_dir, "Robot.xml"))
+                pareto_ckpt = join(gen_dir, "pareto_front.png")
+                save_pareto_front_plot(ea, fitnesses, pareto_ckpt, gen)
+                shutil.copy2(pareto_ckpt, join(results_dir, "pareto_front.png"))
                 obs_stats = join(results_dir, "obs_norm_stats.npz")
                 if os.path.isfile(obs_stats):
                     shutil.copy2(obs_stats, join(gen_dir, "obs_norm_stats.npz"))
@@ -1014,6 +1071,15 @@ def run_multi_task_evolution(
 
     # --- Training summary ---
     best_f = ea.f_best_so_far  # shape (3,) for NSGA-II
+    best_maximin = float(ea.best_scalar_score) if ea.best_scalar_score is not None else float(
+        scalar_fitness_score(best_f)
+    )
+    np.save(join(results_dir, "x_best.npy"), ea.x_best_so_far)
+    np.save(join(results_dir, "f_best.npy"), best_f)
+    if os.path.isfile(_best_xml_stage):
+        shutil.copy2(_best_xml_stage, join(results_dir, "Robot.xml"))
+    save_pareto_front_plot(ea, ea.f, join(results_dir, "pareto_front.png"), ea.current_gen - 1)
+
     score_path = join(results_dir, "training_score.txt")
     with open(score_path, "w") as f:
         f.write("=" * 60 + "\n")
@@ -1029,12 +1095,14 @@ def run_multi_task_evolution(
                 f"  ({world.n_weights} params)\n")
         f.write(f"Genotype size   : {world.n_params}"
                 f"  (controller={world.n_weights}, body={world.n_body_params})\n\n")
-        f.write("Best individual (highest sum of objectives):\n")
+        f.write("Best individual (maximin — highest worst-objective score):\n")
         labels = ["flat", "ice", "hill"]
         for label, val in zip(labels, best_f):
             f.write(f"  {label:<6}: {float(val):10.2f}\n")
-        f.write(f"  {'sum':<6}: {float(best_f.sum()):10.2f}\n")
+        f.write(f"  {'maximin':<6}: {best_maximin:10.2f}\n")
+        f.write(f"  {'sum':<6}: {float(best_f.sum()):10.2f}  (legacy, not used for selection)\n")
     print(f"\nTraining summary saved to: {score_path}")
+    print(f"Pareto front plot saved to: {join(results_dir, 'pareto_front.png')}")
 
 
 if __name__ == "__main__":
@@ -1132,8 +1200,8 @@ if __name__ == "__main__":
             num_generations=200,
             population_size=256,
             n_parents=128,
-            n_repeats=6,
-            n_steps=1000,
+            n_repeats=10,
+            n_steps=2000,
             ckpt_interval=10,
             results_dir=normal_results_dir,
             random_seed=seed_value,

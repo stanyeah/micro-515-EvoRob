@@ -5,6 +5,20 @@ import numpy as np
 from evorob.algorithms.base_ea import EA
 
 
+def scalar_fitness_score(fitness: np.ndarray) -> np.ndarray | float:
+    """Maximin scalar: each individual's worst objective (all objectives maximized)."""
+    fitness = np.asarray(fitness, dtype=np.float64)
+    if fitness.ndim == 1:
+        return float(np.min(fitness))
+    return fitness.min(axis=1)
+
+
+def select_best_index(fitness: np.ndarray) -> int:
+    """Pick the individual with the highest worst-objective value."""
+    scores = scalar_fitness_score(fitness)
+    return int(np.argmax(scores))
+
+
 class NSGAII(EA):
     """Non-dominated Sorting Genetic Algorithm II (NSGA-II).
 
@@ -81,6 +95,7 @@ class NSGAII(EA):
         self.full_f = []
         self.x_best_so_far = None
         self.f_best_so_far = None
+        self.best_scalar_score = None
         self.x = None
         self.f = None
 
@@ -143,23 +158,26 @@ class NSGAII(EA):
         self.x = population
 
         fitness_sums = fitness.sum(axis=1)
-        best_in_current_gen_idx = np.argmax(fitness_sums)
+        best_in_current_gen_idx = select_best_index(fitness)
 
-        current_best_fitness = fitness[best_in_current_gen_idx]
-        current_best_x = population[best_in_current_gen_idx]
+        current_best_fitness = fitness[best_in_current_gen_idx].copy()
+        current_best_x = population[best_in_current_gen_idx].copy()
+        current_score = float(scalar_fitness_score(current_best_fitness))
 
-        if self.current_gen == 0:
+        if self.current_gen == 0 or self.best_scalar_score is None:
             self.f_best_so_far = current_best_fitness
-            self.x_best_so_far = current_best_x
-        else:
-            if np.all(current_best_fitness >= self.f_best_so_far):
-                if np.any(current_best_fitness > self.f_best_so_far):
-                    self.f_best_so_far = current_best_fitness
-                    self.x_best_so_far = current_best_x
+            self.x_best_so_far = current_best_x.copy()
+            self.best_scalar_score = current_score
+        elif current_score > self.best_scalar_score:
+            self.f_best_so_far = current_best_fitness
+            self.x_best_so_far = current_best_x.copy()
+            self.best_scalar_score = current_score
 
         if self.current_gen % 5 == 0:
-            print(f"Generation {self.current_gen}:\t{self.f_best_so_far}")
+            print(f"Generation {self.current_gen}:\tbest maximin={self.best_scalar_score:.2f}"
+                  f"  objectives={self.f_best_so_far}")
             print(f"Mean fitness:\t{self.f.mean():.2f} +- {self.f.std():.2f}")
+            print(f"Best gen sum (legacy):\t{fitness_sums[best_in_current_gen_idx]:.2f}")
             means = np.mean(fitness, axis=0)
             stds = np.std(fitness, axis=0)
             print(f"Mean fitness per obj: {[f'{m:.2f} +-{s:.2f}' for m, s in zip(means, stds)]}")
