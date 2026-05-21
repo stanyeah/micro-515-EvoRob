@@ -16,7 +16,7 @@ class EvalIceEnv(MujocoEnv, utils.EzPickle):
     Termination: torso flip (R[2,2] < 0.0), height z outside [0.2, 1.0] m,
     stuck (||v_xy|| < 1 cm/s for ~10 s), or non-finite state.
 
-    Training reward:  healthy_reward + x_position - ctrl_cost
+    Training reward:  healthy_reward + x_velocity - ctrl_cost
     (ctrl_cost_weight=0.25 by default).  cfrc_cost is logged in info only.
 
     The info dict always exposes the four keys required by the neutral
@@ -68,23 +68,24 @@ class EvalIceEnv(MujocoEnv, utils.EzPickle):
 
     def step(self, action):
         xy_before = self.data.body(1).xpos[:2].copy()
+        x_before = self.data.qpos[0]
         self.do_simulation(action, self.frame_skip)
         xy_after = self.data.body(1).xpos[:2]
+        x_after = self.data.qpos[0]
 
         xy_velocity = (xy_after - xy_before) / self.dt
         self._stuck_steps = advance_stuck_steps(self._stuck_steps, xy_velocity, self.dt)
-        x_position = float(self.data.body(1).xpos[0])
-        x_velocity = float(self.data.qvel[0])
+        x_velocity = (x_after - x_before) / self.dt
         healthy_reward = 1.0
         ctrl_cost = float(np.sum(action ** 2) * self._ctrl_cost_weight)
         cfrc_cost = float(np.sum(self.data.cfrc_ext[1:] ** 2) * self._cfrc_cost_weight)
 
         terminated = self._is_terminated()
-        reward = healthy_reward + x_position - ctrl_cost
+        reward = healthy_reward + x_velocity - ctrl_cost
 
         info = {
             "healthy_reward": -10.0 if terminated else healthy_reward,
-            "x_position": x_position,
+            "x_position": float(x_after),
             "y_position": float(self.data.body(1).xpos[1]),
             "ctrl_cost": ctrl_cost,
             "cfrc_cost": cfrc_cost,

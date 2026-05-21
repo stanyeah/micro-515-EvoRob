@@ -514,8 +514,8 @@ def evaluate_checkpoint(
     # Instantiate env classes directly (not gym.make) so each terrain loads its
     # own world XML — flat and ice must not share the same MuJoCo model.
     terrain_specs = {
-        "flat": (EvalFlatEnv, world.flat_world_file, "position"),
-        "ice":  (EvalIceEnv,  world.ice_world_file,  "position"),
+        "flat": (EvalFlatEnv, world.flat_world_file, "velocity"),
+        "ice":  (EvalIceEnv,  world.ice_world_file,  "velocity"),
         "hill": (EvalHillEnv, world.hill_world_file, "position"),
     }
     _expected_floor_mu = {"flat": 1.0, "ice": 0.2}
@@ -739,7 +739,7 @@ def evaluate_checkpoint(
         f.write(f"Checkpoint      : {checkpoint_dir}\n")
         f.write(f"Episodes/terrain: {n_episodes}\n")
         f.write("Reward          : healthy + forward - ctrl_cost\n")
-        f.write("                  (forward = x_position on all training terrains)\n\n")
+        f.write("                  (forward = x_velocity on flat/ice, x_position on hill)\n\n")
 
         f.write("=" * col + "\n")
         f.write("SUMMARY\n")
@@ -783,10 +783,9 @@ def evaluate_checkpoint(
         f.write("=" * col + "\n\n")
         f.write("Each value is the sum over steps in one episode.\n")
         f.write("Training:  healthy(1.0) + forward - ctrl_cost\n")
-        f.write("  all terrains: forward=x_position, ctrl_weight=0.25\n")
-        f.write("  flat/ice: flip R[2,2]<0, z in [0.2,1]\n")
+        f.write("  flat/ice: forward=x_velocity, ctrl_weight=0.25; flip R[2,2]<0, z in [0.2,1]\n")
         f.write("  all terrains: stuck term ||v_xy||<0.01 m/s for ~10 s\n")
-        f.write("  hill: flip R[2,2]<0\n\n")
+        f.write("  hill: forward=x_position, ctrl_weight=0.25; flip R[2,2]<0\n\n")
 
         summary_keys = [
             "healthy_reward", "forward_reward", "x_position", "ctrl_cost", "cfrc_cost",
