@@ -69,6 +69,10 @@ RESULTS_DIRS = {
     "mind_body": join(ROOT_DIR, "results", "final_mind_body"),
 }
 
+MLP_INPUT_SIZE = 27
+MLP_OUTPUT_SIZE = 8
+MLP_HIDDEN_SIZE = 16
+
 
 # ---------------------------------------------------------------------------
 # FinalWorld — body + brain co-evolution across multiple terrains
@@ -79,8 +83,8 @@ class FinalWorld(World):
 
     Genotype layout
     -----------------
-    * mind_only:  [ MLP weights (280 @ 27→8→8) ] — body from FIXED_BODY_GENOTYPE
-    * mind_body:  [ MLP weights (280 @ 27→8→8) | body params (8) ]
+    * mind_only:  [ MLP weights (560 @ 27→16→8) ] — body from FIXED_BODY_GENOTYPE
+    * mind_body:  [ MLP weights (560 @ 27→16→8) | body params (8) ]
 
     Each call to evaluate_individual generates the robot body XML, injects it
     into every terrain template, then runs the controller in parallel episodes.
@@ -95,7 +99,7 @@ class FinalWorld(World):
             )
 
         self.controller = NeuralNetworkController(
-            input_size=27, output_size=8, hidden_size=8
+            input_size=MLP_INPUT_SIZE, output_size=MLP_OUTPUT_SIZE, hidden_size=MLP_HIDDEN_SIZE
         )
 
         if self.evolution_mode == "mind_only":
@@ -482,7 +486,9 @@ def evaluate_checkpoint(
 
     fixed_body = _load("fixed_body_genotype.npy")
     x_size = int(np.asarray(x_best).size)
-    _MLP_CTRL_GENES = 280
+    _MLP_CTRL_GENES = NeuralNetworkController(
+        MLP_INPUT_SIZE, MLP_OUTPUT_SIZE, MLP_HIDDEN_SIZE
+    ).n_params
     _MLP_MIND_BODY_GENES = _MLP_CTRL_GENES + 8
     if x_size == _MLP_CTRL_GENES:
         ckpt_mode = "mind_only"

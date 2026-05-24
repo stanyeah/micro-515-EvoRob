@@ -40,7 +40,10 @@ def _zscore_obs_sensor(mean: np.ndarray, std: np.ndarray):
 _FIXED_BODY_GENOTYPE = np.array(
     [-0.6, 0.2, -0.6, 0.2, -0.6, 0.2, -0.6, 0.2], dtype=np.float64
 )
-_MLP_CTRL_GENES = 280        # 27→8→8 feedforward MLP weights
+_MLP_INPUT = 27
+_MLP_OUTPUT = 8
+_MLP_HIDDEN = 16
+_MLP_CTRL_GENES = _MLP_INPUT * _MLP_HIDDEN + _MLP_HIDDEN * _MLP_OUTPUT  # 27→16→8
 _MIND_BODY_GENES = _MLP_CTRL_GENES + 8
 _LEGACY_HEBBIAN_CTRL_GENES = 1120
 _LEGACY_MIND_BODY_GENES = _LEGACY_HEBBIAN_CTRL_GENES + 8
@@ -98,7 +101,9 @@ class EvalWorld(World):
     @staticmethod
     def _default_controller():
         from evorob.world.robot.controllers.mlp import NeuralNetworkController
-        return NeuralNetworkController(input_size=27, output_size=8, hidden_size=8)
+        return NeuralNetworkController(
+            input_size=_MLP_INPUT, output_size=_MLP_OUTPUT, hidden_size=_MLP_HIDDEN
+        )
 
     def set_controller(self, controller: Controller) -> None:
         """Override the default MLP controller.
@@ -156,7 +161,7 @@ class EvalWorld(World):
             if self.n_weights != _MLP_CTRL_GENES:
                 raise ValueError(
                     f"mind-only checkpoint ({genotype_size} genes) requires a controller "
-                    f"with {_MLP_CTRL_GENES} parameters (MLP 27→8→8); "
+                    f"with {_MLP_CTRL_GENES} parameters (MLP 27→16→8); "
                     f"got {self.n_weights} from {type(self.controller).__name__}."
                 )
         elif genotype_size == _MIND_BODY_GENES:
