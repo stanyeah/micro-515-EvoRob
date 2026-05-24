@@ -17,7 +17,7 @@ class EvalHillEnv(MujocoEnv, utils.EzPickle):
     No height-based termination on hills.
 
     Training reward:  healthy_reward + x_position - ctrl_cost
-    (ctrl_cost_weight=0.25 by default).  cfrc_cost is logged in info only.
+    (ctrl_cost_weight=0.5 by default).  cfrc_cost is logged in info only.
 
     The info dict always exposes the four keys required by the neutral
     leaderboard formula: healthy_reward, x_position, ctrl_cost, cfrc_cost.
@@ -30,7 +30,7 @@ class EvalHillEnv(MujocoEnv, utils.EzPickle):
         robot_path: str,
         frame_skip: int = 5,
         default_camera_config: dict = DEFAULT_CAMERA_CONFIG,
-        ctrl_cost_weight: float = 0.25,
+        ctrl_cost_weight: float = 0.5,
         cfrc_cost_weight: float = 5e-4,
         reset_noise_scale: float = 0.1,
         **kwargs,

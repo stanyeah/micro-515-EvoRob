@@ -793,9 +793,9 @@ def evaluate_checkpoint(
         f.write("=" * col + "\n\n")
         f.write("Each value is the sum over steps in one episode.\n")
         f.write("Training:  healthy(1.0) + forward - ctrl_cost\n")
-        f.write("  flat/ice: forward=x_velocity, ctrl_weight=0.25; flip R[2,2]<0, z in [0.2,1]\n")
+        f.write("  flat/ice: forward=x_velocity, ctrl_weight=0.5; flip R[2,2]<0, z in [0.2,1]\n")
         f.write("  all terrains: stuck term ||v_xy||<0.01 m/s for ~10 s\n")
-        f.write("  hill: forward=x_position, ctrl_weight=0.25; flip R[2,2]<0\n\n")
+        f.write("  hill: forward=x_position, ctrl_weight=0.5; flip R[2,2]<0\n\n")
 
         summary_keys = [
             "healthy_reward", "forward_reward", "x_position", "ctrl_cost", "cfrc_cost",
